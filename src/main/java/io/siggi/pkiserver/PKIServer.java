@@ -4,6 +4,7 @@ import io.siggi.http.HTTPRequest;
 import io.siggi.http.HTTPServer;
 import io.siggi.http.HTTPServerBuilder;
 import io.siggi.http.iphelper.IP;
+import io.siggi.pkiserver.store.Store;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -32,6 +33,7 @@ public final class PKIServer {
     private boolean stopped;
     private ServerSocket serverSocket;
     private HTTPServer httpServer;
+    private Store store;
     private ExecutorService executor;
     private Thread acceptThread;
     private volatile boolean stopping;
@@ -51,6 +53,7 @@ public final class PKIServer {
             if (started) throw new IllegalStateException("Already started");
             started = true;
             Files.createDirectories(config.dataDir());
+            store = Store.open(config.dataDir());
 
             executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("PKIServer-http-", 0).factory());
             httpServer = new HTTPServerBuilder()
@@ -80,6 +83,14 @@ public final class PKIServer {
             log.info("Trusted proxies: " + String.join(", ", config.trustedProxies()));
         } else {
             log.info("No trusted proxies configured: uploads are disabled");
+        }
+    }
+
+    /** The data store, loaded at {@link #start()}. */
+    public Store getStore() {
+        synchronized (lock) {
+            if (store == null) throw new IllegalStateException("Not started");
+            return store;
         }
     }
 
