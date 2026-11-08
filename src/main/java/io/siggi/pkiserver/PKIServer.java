@@ -12,6 +12,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.file.Files;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -67,6 +68,7 @@ public final class PKIServer {
             store = Store.open(config.dataDir());
             publicFiles = new PublicFiles(store);
             api = new Api(config);
+            api.registerUpload(CertificateUpload.PATH, new CertificateUpload(store, Clock.systemUTC()));
 
             executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("PKIServer-http-", 0).factory());
             httpServer = new HTTPServerBuilder()

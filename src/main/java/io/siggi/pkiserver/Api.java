@@ -197,6 +197,17 @@ final class Api {
         }
     }
 
+    /** Sends a JSON response. */
+    static void json(HTTPRequest request, int status, String reason, JsonObject json) throws IOException {
+        byte[] body = (json + "\n").getBytes(StandardCharsets.UTF_8);
+        HTTPResponse response = request.response;
+        response.setHeader(status + " " + reason);
+        response.setHeader("Cache-Control", "no-store");
+        response.setContentType(JSON);
+        response.contentLength(body.length);
+        if (!request.method.equals("HEAD")) response.write(body);
+    }
+
     /**
      * Sends a JSON error. With {@code closeConnection}, the connection is closed afterwards so
      * that a body we didn't read can't be mistaken for the next request.
