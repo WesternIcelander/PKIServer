@@ -256,4 +256,68 @@ class ApiGateTest {
         }
         assertEquals(3, uploads.get());
     }
+
+    private Response get(String path, String extraHeaders) throws IOException {
+        return send("GET " + path + " HTTP/1.1\nHost: pki.test\n" + extraHeaders, null);
+    }
+
+    @Test
+    void malformedPathsAre400Json() throws Exception {
+        start("[\"127.0.0.1\"]", null);
+        for (String path : new String[]{"/%2e%2e/data/config.json", "/tls2/%2e%2e/%2e%2e/config.json",
+                "/api/crl/%2e%2e", "/api/crl/..%2fx", "/a\\b.der", "/tls2.der%00", "/%C3%A9.der", "/tls2//x",
+                "/tls2/", "/./tls2.der", "/api/../tls2.der", "/x:y", "/" + "a".repeat(600)}) {
+            Response r = get(path, VIA_PROXY);
+            assertEquals(400, r.status(), path);
+            assertTrue(r.headers().get("content-type").startsWith("application/json"), path);
+            assertFalse(r.error().isEmpty(), path);
+        }
+        // Malformed API paths are still behind the HTTPS gate.
+        assertEquals(403, get("/api/crl/%2e%2e", "").status());
+        // Same for uploads: refused before the body is read, without reaching the handler.
+        Response r = post("/api/../api/test", VIA_PROXY, BODY);
+        assertEquals(400, r.status());
+        assertEquals(0, uploads.get());
+    }
+
+    @Test
+    void malformedSlugOrSerialIs400() throws Exception {
+        start("[\"127.0.0.1\"]", null);
+        for (String path : new String[]{"/TLS2/a3f1/certificate.pem", "/tls2/00a3f1/chain.pem",
+                "/tls2/A3F1/fullchain.pem", "/tls2/a3g1/certificate.der", "/api/crl/TLS2"}) {
+            Response r = get(path, VIA_PROXY);
+            assertEquals(400, r.status(), path);
+            assertTrue(r.error().contains("invalid"), r.error());
+        }
+        // Not one of our file names: just not found.
+        assertEquals(404, get("/.well-known/acme-challenge/token", "").status());
+    }
+
+    @Test
+    void errorsAreJson() throws Exception {
+        start("[\"127.0.0.1\"]", null);
+        Response r = get("/nothing-here", "");
+        assertEquals(404, r.status());
+        assertEquals("not found", r.error());
+        assertEquals("no-store", r.headers().get("cache-control"));
+
+        r = post("/", "", BODY);
+        assertEquals(405, r.status());
+        assertEquals("GET, HEAD, OPTIONS", r.headers().get("allow"));
+        assertEquals("use GET", r.error());
+    }
+
+    @Test
+    void unexpectedFailureIsJson500WithoutDetails() throws Exception {
+        start("[\"127.0.0.1\"]", null);
+        server.getApi().registerUpload("/api/broken", (request, body) -> {
+            throw new IllegalStateException("secret internal detail");
+        });
+        Response r = post("/api/broken", VIA_PROXY, BODY);
+        assertEquals(500, r.status());
+        assertTrue(r.headers().get("content-type").startsWith("application/json"));
+        assertEquals("internal server error", r.error());
+        assertFalse(r.body().contains("secret"), r.body());
+        assertEquals("close", r.headers().get("connection").toLowerCase(Locale.ROOT));
+    }
 }

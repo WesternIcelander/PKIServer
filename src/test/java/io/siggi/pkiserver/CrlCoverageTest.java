@@ -193,7 +193,8 @@ class CrlCoverageTest {
         HttpResponse<String> head = get("/api/crl/siggi.io", true, "HEAD");
         assertEquals(200, head.statusCode(), head.headers().map().toString());
         assertEquals(404, get("/api/crl/nope", true, "GET").statusCode());
-        assertEquals(404, get("/api/crl/..", true, "GET").statusCode());
+        assertEquals(400, get("/api/crl/..", true, "GET").statusCode());
+        assertEquals(400, get("/api/crl/Siggi.io", true, "GET").statusCode());
         HttpResponse<String> post = get("/api/crl/siggi.io", true, "POST");
         assertEquals(405, post.statusCode());
         assertEquals("GET, HEAD", post.headers().firstValue("Allow").orElseThrow());

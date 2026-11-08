@@ -265,11 +265,17 @@ class PublicFilesTest {
     @Test
     void unknownEndEntityPathsAre404() throws Exception {
         for (String path : new String[]{"/tls3/a3f1/certificate.pem", "/tls2/a3f2/certificate.pem",
-                "/siggi.io/a3f1/certificate.pem", "/tls2/00a3f1/certificate.pem", "/tls2/A3F1/certificate.pem",
-                "/tls2/a3f1/certificate.crt", "/tls2/a3f1/chain.der", "/tls2/a3f1", "/tls2/a3f1/",
-                "/tls2/a3f1/certificate.pem/x", "/tls2//certificate.pem", "/tls2/a3f1/../a3f1/chain.pem",
-                "/../tls2/a3f1/chain.pem", "/tls2.der/a3f1/certificate.pem"}) {
+                "/siggi.io/a3f1/certificate.pem", "/tls2/a3f1/certificate.crt", "/tls2/a3f1/chain.der",
+                "/tls2/a3f1", "/tls2/a3f1/certificate.pem/x", "/tls2.der/a3f1/certificate.pem"}) {
             assertEquals(404, get(path).statusCode(), path);
+        }
+        // Malformed slug/serial, traversal and empty segments: 400.
+        for (String path : new String[]{"/tls2/00a3f1/certificate.pem", "/tls2/A3F1/certificate.pem",
+                "/TLS2/a3f1/certificate.pem", "/tls2/a3f1/", "/tls2//certificate.pem",
+                "/tls2/a3f1/../a3f1/chain.pem", "/../tls2/a3f1/chain.pem"}) {
+            HttpResponse<byte[]> r = get(path);
+            assertEquals(400, r.statusCode(), path);
+            assertTrue(r.headers().firstValue("Content-Type").orElseThrow().startsWith("application/json"), path);
         }
     }
 

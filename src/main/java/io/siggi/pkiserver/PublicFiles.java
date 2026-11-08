@@ -115,14 +115,23 @@ final class PublicFiles {
         }
     }
 
-    /** {@code /<slug>/<serial>/<file>}; anything else, or an unknown slug/serial, is a 404. */
+    /**
+     * {@code /<slug>/<serial>/<file>}. For one of our file names, a malformed slug or serial is a
+     * 400; any other path, or an unknown slug/serial/file, is a 404.
+     */
     private boolean handleEndEntity(HTTPRequest request, String path) throws Exception {
         String[] parts = path.substring(1).split("/", -1);
         if (parts.length != 3) return false;
         String slug = parts[0];
         String serial = parts[1];
         EeFile file = EeFile.of(parts[2]);
-        if (file == null || !Store.isStorableSlug(slug) || !isFormattedSerial(serial)) return false;
+        if (file == null) return false;
+        String problem = RequestPaths.slugProblem(slug);
+        if (problem == null) problem = RequestPaths.serialProblem(serial);
+        if (problem != null) {
+            Api.error(request, 400, "Bad Request", problem, !isGetOrHead(request));
+            return true;
+        }
         EndEntityCert ee = store.endEntityCert(slug, serial);
         if (ee == null || store.signingCert(slug) == null) return false;
         byte[] body;
@@ -310,18 +319,23 @@ final class PublicFiles {
         return false;
     }
 
-    /** Only GET and HEAD; anything else gets a 405. */
+    static boolean isGetOrHead(HTTPRequest request) {
+        return request.method.equals("GET") || request.method.equals("HEAD");
+    }
+
+    /** Only GET and HEAD (and OPTIONS); anything else gets a 405. */
     private static boolean allowGet(HTTPRequest request) throws Exception {
-        if (request.method.equals("GET") || request.method.equals("HEAD")) return true;
+        if (isGetOrHead(request)) return true;
         HTTPResponse response = request.response;
+        response.setHeader("Allow", "GET, HEAD, OPTIONS");
         if (request.method.equals("OPTIONS")) {
             response.setHeader("204 No Content");
+            response.contentLength(0);
+            response.sendHeaders();
         } else {
-            response.setHeader("405 Method Not Allowed");
+            // The body (if any) isn't read: close the connection after answering.
+            Api.error(request, 405, "Method Not Allowed", "use GET", true);
         }
-        response.setHeader("Allow", "GET, HEAD, OPTIONS");
-        response.contentLength(0);
-        response.sendHeaders();
         return false;
     }
 

@@ -114,7 +114,12 @@ record CrlCoverage(String slug, Instant now, StoredCrl current, List<StoredCrl> 
     /** {@code GET /api/crl/<slug>}: the coverage report as JSON. */
     static Api.GetHandler apiHandler(Store store, Clock clock, Duration warnThreshold) {
         return (request, rest) -> {
-            if (!Store.isStorableSlug(rest) || store.signingCert(rest) == null) {
+            String problem = RequestPaths.slugProblem(rest);
+            if (problem != null) {
+                Api.error(request, 400, "Bad Request", problem, false);
+                return;
+            }
+            if (store.signingCert(rest) == null) {
                 Api.error(request, 404, "Not Found", "no signing certificate named " + rest, false);
                 return;
             }

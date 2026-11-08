@@ -202,6 +202,11 @@ public final class PKIServer {
         activeRequests.incrementAndGet();
         try {
             handleRequest(request);
+        } catch (Exception e) {
+            log.log(Level.SEVERE, "Failed to handle " + request.method + " " + request.url, e);
+            // Otherwise SiggiHTTP would send an HTML page with the stack trace.
+            if (request.response.alreadyWrote()) throw e;
+            Api.error(request, 500, "Internal Server Error", "internal server error", true);
         } finally {
             activeRequests.decrementAndGet();
         }
@@ -209,15 +214,19 @@ public final class PKIServer {
 
     private void handleRequest(HTTPRequest request) throws Exception {
         if (Api.isApiPath(request.url)) {
+            // The API validates the path itself, after its HTTPS gate.
             InetAddress peer = PEER.get();
             if (peer == null) throw new IllegalStateException("connection address unknown");
             api.handle(request, peer);
             return;
         }
+        String problem = RequestPaths.problem(request.url);
+        if (problem != null) {
+            Api.error(request, 400, "Bad Request", problem, !PublicFiles.isGetOrHead(request));
+            return;
+        }
         if (publicFiles.handle(request)) return;
-        request.response.setHeader("404 Not Found");
-        request.response.setContentType("text/plain; charset=utf-8");
-        request.response.write("Not found\n");
+        Api.error(request, 404, "Not Found", "not found", !PublicFiles.isGetOrHead(request));
     }
 
     /**

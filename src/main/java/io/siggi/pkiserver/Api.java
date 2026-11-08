@@ -25,7 +25,8 @@ import java.util.logging.Logger;
  * ({@code X-Forwarded-Proto: https}). Everything else gets {@code 403} without its body being
  * read. With no trusted proxy configured, the API is disabled.
  * <p>
- * After the gate, uploads (POST) are rate limited per client IP and their bodies are limited
+ * After the gate, the path is checked with {@link RequestPaths} (malformed: {@code 400}), and
+ * uploads (POST) are rate limited per client IP and their bodies are limited
  * to {@link Config.Limits#maxUploadBytes()}.
  */
 final class Api {
@@ -100,6 +101,11 @@ final class Api {
             log.fine(() -> "Refused " + request.method + " " + request.url + " from " + peer.getHostAddress()
                     + ": " + refusal);
             error(request, 403, "Forbidden", refusal, true);
+            return;
+        }
+        String pathProblem = RequestPaths.problem(request.url);
+        if (pathProblem != null) {
+            error(request, 400, "Bad Request", pathProblem, true);
             return;
         }
 
