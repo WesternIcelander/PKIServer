@@ -173,3 +173,6 @@ ones, so the next CRL must use at least `nextCrlNumber`. `coverageUntil` is the 
 `nextUpdate` across the current and pending CRLs. `coverageWarning` is set when that is
 less than `limits.coverageWarningDays` away (or already past). The index page shows the
 same information per CA.
+
+[`examples/upload-crls.py`](examples/upload-crls.py) is a signer-side helper that uploads a
+batch of pre-signed CRLs and prints this report; see [`examples/README.md`](examples/README.md).
