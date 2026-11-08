@@ -44,6 +44,8 @@ class PublicFilesTest {
     private static KeyPair rootKey;
     private static X509Certificate root;
     private static X509Certificate inter;
+    private static X509Certificate leaf;
+    private static X509Certificate rootLeaf;
 
     @TempDir
     Path dir;
@@ -56,6 +58,10 @@ class PublicFilesTest {
         KeyPair interKey = keyPair();
         root = cert("CN=Siggi.io", rootKey.getPublic(), "CN=Siggi.io", rootKey);
         inter = cert("CN=TLS 2,O=<Script & Co>", interKey.getPublic(), "CN=Siggi.io", rootKey);
+        leaf = cert("CN=www.example.com", keyPair().getPublic(), "CN=TLS 2,O=<Script & Co>", interKey,
+                new BigInteger("00a3f1", 16), false);
+        rootLeaf = cert("CN=direct.example.com", keyPair().getPublic(), "CN=Siggi.io", rootKey,
+                BigInteger.valueOf(0x1234), false);
     }
 
     @BeforeEach
@@ -65,6 +71,8 @@ class PublicFilesTest {
         store.addSigningCert("siggi.io", root);
         store.addSigningCert("tls2", inter);
         store.addCrl("siggi.io", crl(), CrlState.CURRENT, Instant.now());
+        store.addEndEntityCert("tls2", leaf, Instant.now());
+        store.addEndEntityCert("siggi.io", rootLeaf, Instant.now());
         server = new PKIServer(Config.parse("{\"listen\": \"127.0.0.1:0\", \"dataDir\": \"data\"}", dir));
         server.start();
         client = HttpClient.newHttpClient();
@@ -83,11 +91,16 @@ class PublicFilesTest {
 
     private static X509Certificate cert(String subject, PublicKey key, String issuer, KeyPair issuerKey)
             throws Exception {
+        return cert(subject, key, issuer, issuerKey, BigInteger.ONE, true);
+    }
+
+    private static X509Certificate cert(String subject, PublicKey key, String issuer, KeyPair issuerKey,
+                                        BigInteger serial, boolean ca) throws Exception {
         Instant now = Instant.now().truncatedTo(ChronoUnit.SECONDS);
-        JcaX509v3CertificateBuilder b = new JcaX509v3CertificateBuilder(new X500Name(issuer), BigInteger.ONE,
+        JcaX509v3CertificateBuilder b = new JcaX509v3CertificateBuilder(new X500Name(issuer), serial,
                 Date.from(now.minus(Duration.ofDays(1))), Date.from(now.plus(Duration.ofDays(30))),
                 new X500Name(subject), key);
-        b.addExtension(Extension.basicConstraints, true, new BasicConstraints(true));
+        b.addExtension(Extension.basicConstraints, true, new BasicConstraints(ca));
         return new JcaX509CertificateConverter().getCertificate(
                 b.build(new JcaContentSignerBuilder("SHA256withECDSA").build(issuerKey.getPrivate())));
     }
@@ -191,6 +204,81 @@ class PublicFilesTest {
                 "/..der", "/TLS2.der", "/.der"}) {
             assertEquals(404, get(path).statusCode(), path);
         }
+    }
+
+    @Test
+    void servesEndEntityCertificate() throws Exception {
+        HttpResponse<byte[]> r = get("/tls2/a3f1/certificate.der");
+        assertEquals(200, r.statusCode());
+        assertEquals("application/pkix-cert", r.headers().firstValue("Content-Type").orElseThrow());
+        assertArrayEquals(leaf.getEncoded(), r.body());
+        String derEtag = r.headers().firstValue("ETag").orElseThrow();
+        assertTrue(r.headers().firstValue("Last-Modified").isPresent());
+        assertTrue(r.headers().firstValue("Cache-Control").orElseThrow().contains("max-age="));
+
+        r = get("/tls2/a3f1/certificate.pem");
+        assertEquals(200, r.statusCode());
+        assertEquals("application/x-pem-file", r.headers().firstValue("Content-Type").orElseThrow());
+        assertEquals(java.util.List.of(leaf), X509Util.parseCertificates(r.body()));
+        String pemEtag = r.headers().firstValue("ETag").orElseThrow();
+        assertNotEquals(derEtag, pemEtag);
+
+        r = client.send(req("/tls2/a3f1/certificate.pem").header("If-None-Match", pemEtag).build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(304, r.statusCode());
+    }
+
+    @Test
+    void servesChainAndFullchain() throws Exception {
+        HttpResponse<byte[]> r = get("/tls2/a3f1/chain.pem");
+        assertEquals(200, r.statusCode());
+        assertEquals("application/x-pem-file", r.headers().firstValue("Content-Type").orElseThrow());
+        assertEquals(java.util.List.of(inter), X509Util.parseCertificates(r.body()), "issuer only, no root");
+        String etag = r.headers().firstValue("ETag").orElseThrow();
+        assertTrue(r.headers().firstValue("Last-Modified").isPresent());
+        r = client.send(req("/tls2/a3f1/chain.pem").header("If-None-Match", etag).build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(304, r.statusCode());
+
+        r = get("/tls2/a3f1/fullchain.pem");
+        assertEquals(200, r.statusCode());
+        assertEquals(java.util.List.of(leaf, inter), X509Util.parseCertificates(r.body()));
+        assertNotEquals(etag, r.headers().firstValue("ETag").orElseThrow());
+
+        // Issued directly by the root: empty chain, fullchain is just the leaf.
+        r = get("/siggi.io/1234/chain.pem");
+        assertEquals(200, r.statusCode());
+        assertEquals(0, r.body().length);
+        r = get("/siggi.io/1234/fullchain.pem");
+        assertEquals(200, r.statusCode());
+        assertEquals(java.util.List.of(rootLeaf), X509Util.parseCertificates(r.body()));
+
+        r = client.send(req("/siggi.io/1234/fullchain.pem").method("HEAD", HttpRequest.BodyPublishers.noBody())
+                .build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, r.statusCode());
+        assertEquals(0, r.body().length);
+        r = client.send(req("/tls2/a3f1/chain.pem").POST(HttpRequest.BodyPublishers.ofString("x")).build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(405, r.statusCode());
+    }
+
+    @Test
+    void unknownEndEntityPathsAre404() throws Exception {
+        for (String path : new String[]{"/tls3/a3f1/certificate.pem", "/tls2/a3f2/certificate.pem",
+                "/siggi.io/a3f1/certificate.pem", "/tls2/00a3f1/certificate.pem", "/tls2/A3F1/certificate.pem",
+                "/tls2/a3f1/certificate.crt", "/tls2/a3f1/chain.der", "/tls2/a3f1", "/tls2/a3f1/",
+                "/tls2/a3f1/certificate.pem/x", "/tls2//certificate.pem", "/tls2/a3f1/../a3f1/chain.pem",
+                "/../tls2/a3f1/chain.pem", "/tls2.der/a3f1/certificate.pem"}) {
+            assertEquals(404, get(path).statusCode(), path);
+        }
+    }
+
+    @Test
+    void unchainableEndEntityHasNoChain() throws Exception {
+        server.getStore().removeSigningCert("siggi.io");
+        assertEquals(404, get("/tls2/a3f1/chain.pem").statusCode());
+        assertEquals(404, get("/tls2/a3f1/fullchain.pem").statusCode());
+        assertEquals(200, get("/tls2/a3f1/certificate.pem").statusCode());
     }
 
     @Test

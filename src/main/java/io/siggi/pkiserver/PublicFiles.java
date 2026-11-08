@@ -4,6 +4,7 @@ import io.siggi.http.HTTPRequest;
 import io.siggi.http.HTTPResponse;
 import io.siggi.pkiserver.store.CaRole;
 import io.siggi.pkiserver.store.CrlState;
+import io.siggi.pkiserver.store.EndEntityCert;
 import io.siggi.pkiserver.store.SigningCert;
 import io.siggi.pkiserver.store.Store;
 import io.siggi.pkiserver.store.StoredCrl;
@@ -17,13 +18,17 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
+import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
 /**
  * Serves the public, read-only files: signing certificates at {@code /<slug>.der}
  * (alias {@code .crt}) and {@code /<slug>.pem}, their current CRLs at {@code /<slug>.crl} and
- * {@code /<slug>.crl.pem}, and the index page at {@code /}.
+ * {@code /<slug>.crl.pem}, end-entity certificates at
+ * {@code /<slug>/<serial>/{certificate,chain,fullchain}.pem} and {@code certificate.der}, and the
+ * index page at {@code /}.
  * <p>
  * A current CRL that is past its {@code nextUpdate} is still served (better than a 404), with
  * {@code max-age=0}; the index page flags it as stale and the {@link CrlScheduler} logs it.
@@ -48,10 +53,12 @@ final class PublicFiles {
 
     private final Store store;
     private final Duration coverageWarning;
+    private final ChainBuilder chains;
 
     PublicFiles(Store store, Duration coverageWarning) {
         this.store = store;
         this.coverageWarning = coverageWarning;
+        this.chains = new ChainBuilder(store);
     }
 
     /**
@@ -66,7 +73,8 @@ final class PublicFiles {
             serveIndex(request);
             return true;
         }
-        if (!path.startsWith("/") || path.indexOf('/', 1) >= 0) return false;
+        if (!path.startsWith("/")) return false;
+        if (path.indexOf('/', 1) >= 0) return handleEndEntity(request, path);
         String name = path.substring(1);
         // Longest suffix first: "/tls2.crl.pem" is tls2's CRL, unless there is no "tls2" but
         // there is a (hand-installed) "tls2.crl", in which case it's that one's certificate.
@@ -88,6 +96,83 @@ final class PublicFiles {
             return true;
         }
         return false;
+    }
+
+    /** The files published for an end-entity certificate, by name. */
+    private enum EeFile {
+        CERTIFICATE_PEM("certificate.pem"), CERTIFICATE_DER("certificate.der"),
+        CHAIN_PEM("chain.pem"), FULLCHAIN_PEM("fullchain.pem");
+
+        final String name;
+
+        EeFile(String name) {
+            this.name = name;
+        }
+
+        static EeFile of(String name) {
+            for (EeFile f : values()) if (f.name.equals(name)) return f;
+            return null;
+        }
+    }
+
+    /** {@code /<slug>/<serial>/<file>}; anything else, or an unknown slug/serial, is a 404. */
+    private boolean handleEndEntity(HTTPRequest request, String path) throws Exception {
+        String[] parts = path.substring(1).split("/", -1);
+        if (parts.length != 3) return false;
+        String slug = parts[0];
+        String serial = parts[1];
+        EeFile file = EeFile.of(parts[2]);
+        if (file == null || !Store.isStorableSlug(slug) || !isFormattedSerial(serial)) return false;
+        EndEntityCert ee = store.endEntityCert(slug, serial);
+        if (ee == null || store.signingCert(slug) == null) return false;
+        byte[] body;
+        String contentType = PEM;
+        String etag;
+        Instant lastModified = ee.uploadedAt();
+        switch (file) {
+            case CERTIFICATE_DER -> {
+                body = ee.der();
+                contentType = PKIX_CERT;
+                etag = "\"" + ee.sha256() + "\"";
+            }
+            case CERTIFICATE_PEM -> {
+                body = X509Util.pem(ee.cert()).getBytes(StandardCharsets.US_ASCII);
+                etag = "\"" + ee.sha256() + "-pem\"";
+            }
+            default -> {
+                List<SigningCert> chain = chains.chain(slug);
+                // No path of installed certificates to a root (e.g. one was removed): not published.
+                if (chain == null) return false;
+                List<X509Certificate> certs = new ArrayList<>();
+                if (file == EeFile.FULLCHAIN_PEM) certs.add(ee.cert());
+                for (SigningCert sc : chain) {
+                    certs.add(sc.cert());
+                    Instant modified = store.signingCertModified(sc.slug());
+                    if (modified != null && (lastModified == null || modified.isAfter(lastModified))) {
+                        lastModified = modified;
+                    }
+                }
+                body = X509Util.pem(certs).getBytes(StandardCharsets.US_ASCII);
+                // Built at serve time, so the ETag covers exactly what's sent.
+                etag = "\"" + X509Util.sha256Hex(body) + "\"";
+            }
+        }
+        if (!allowGet(request)) return true;
+        request.response.setHeader("Cache-Control", "public, max-age=" + CERT_MAX_AGE_SECONDS);
+        if (lastModified != null && lastModified.isAfter(Instant.now())) lastModified = Instant.now();
+        send(request, contentType, body, etag, lastModified);
+        return true;
+    }
+
+    /** Lowercase hex, no leading zeros, as produced by {@code X509Util.formatSerial}. */
+    static boolean isFormattedSerial(String serial) {
+        if (serial.isEmpty()) return false;
+        if (serial.length() > 1 && serial.charAt(0) == '0') return false;
+        for (int i = 0; i < serial.length(); i++) {
+            char c = serial.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        }
+        return true;
     }
 
     /** URL suffixes, longest first. */
