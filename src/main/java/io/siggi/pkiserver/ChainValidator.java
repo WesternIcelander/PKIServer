@@ -92,7 +92,7 @@ final class ChainValidator {
      * Depth-first search for every chain of installed signing certificates from the issuer of
      * {@code cert} up to an installed root, following subject DN and signature.
      */
-    private void findPaths(X509Certificate cert, List<SigningCert> above, List<List<SigningCert>> out) {
+    void findPaths(X509Certificate cert, List<SigningCert> above, List<List<SigningCert>> out) {
         if (above.size() + 1 >= MAX_PATH_LENGTH) return;
         for (SigningCert issuer : store.signingCertsBySubject(cert.getIssuerX500Principal())) {
             if (!signedBy(cert, issuer.cert())) continue;
