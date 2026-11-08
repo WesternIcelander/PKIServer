@@ -11,12 +11,17 @@ import io.siggi.http.iphelper.IP;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -32,7 +37,8 @@ import java.util.Set;
  *     "uploadsPerMinutePerIp": 60,
  *     "crlMaxFutureDays": 366,
  *     "coverageWarningDays": 30
- *   }
+ *   },
+ *   "notifications": { ... see {@link Notifications} ... }
  * }
  * </pre>
  * <p>
@@ -43,7 +49,8 @@ public record Config(
         InetSocketAddress listen,
         List<String> trustedProxies,
         Path dataDir,
-        Limits limits
+        Limits limits,
+        Notifications notifications
 ) {
     public static final String DEFAULT_LISTEN = "0.0.0.0:8080";
 
@@ -82,7 +89,7 @@ public record Config(
             throw new ConfigException("top level must be a JSON object");
         }
         JsonObject root = rootElement.getAsJsonObject();
-        checkKeys(root, "", Set.of("listen", "trustedProxies", "dataDir", "limits"));
+        checkKeys(root, "", Set.of("listen", "trustedProxies", "dataDir", "limits", "notifications"));
 
         InetSocketAddress listen = parseListen(getString(root, "listen", DEFAULT_LISTEN));
 
@@ -125,7 +132,175 @@ public record Config(
             }
         }
 
-        return new Config(listen, trustedProxies, dataDir, limits);
+        Notifications notifications = Notifications.NONE;
+        if (root.has("notifications") && !root.get("notifications").isJsonNull()) {
+            notifications = parseNotifications(root.get("notifications"));
+        }
+
+        return new Config(listen, trustedProxies, dataDir, limits, notifications);
+    }
+
+    /**
+     * Where and when to send notifications (CRL coverage running low, stale CRL, signing or
+     * published certificates nearing expiry). Both channels are optional; with neither,
+     * notifications are off.
+     *
+     * <pre>
+     * "notifications": {
+     *   "name": "pki.siggi.io",
+     *   "certExpiryWarningDays": 30,
+     *   "checkIntervalMinutes": 60,
+     *   "repeatHours": 24,
+     *   "webhook": {"url": "https://hooks.example.com/x", "headers": {"Authorization": "Bearer ..."}},
+     *   "email": {
+     *     "host": "smtp.example.com", "port": 587, "security": "starttls",
+     *     "username": "pki", "password": "...",
+     *     "from": "pki@example.com", "to": ["admin@example.com"]
+     *   }
+     * }
+     * </pre>
+     *
+     * @param name                  shown in messages to tell servers apart; null = local host name
+     * @param certExpiryWarningDays warn about certificates expiring less than this many days away
+     * @param checkIntervalMinutes  how often the conditions are checked
+     * @param repeatHours           repeat a still-active alert this often; 0 = only once
+     * @param webhook               the webhook, or null
+     * @param email                 the email settings, or null
+     */
+    public record Notifications(String name, int certExpiryWarningDays, int checkIntervalMinutes, int repeatHours,
+                                Webhook webhook, Email email) {
+        public static final Notifications NONE = new Notifications(null, 30, 60, 24, null, null);
+
+        public boolean enabled() {
+            return webhook != null || email != null;
+        }
+    }
+
+    /** A webhook: alerts are POSTed to {@code url} as JSON, with the extra {@code headers}. */
+    public record Webhook(URI url, Map<String, String> headers) {
+        public Webhook {
+            headers = Map.copyOf(headers);
+        }
+    }
+
+    /** SMTP settings. {@code security} is {@code starttls}, {@code tls} (implicit) or {@code none}. */
+    public record Email(String host, int port, String security, String username, String password, String from,
+                        List<String> to) {
+        public Email {
+            to = List.copyOf(to);
+        }
+
+        @Override
+        public String toString() {
+            // Keep the password out of logs.
+            return "Email[host=" + host + ", port=" + port + ", security=" + security + ", username=" + username
+                    + ", from=" + from + ", to=" + to + "]";
+        }
+    }
+
+    private static Notifications parseNotifications(JsonElement el) throws ConfigException {
+        if (!el.isJsonObject()) throw new ConfigException("notifications must be an object");
+        JsonObject n = el.getAsJsonObject();
+        String p = "notifications.";
+        checkKeys(n, p, Set.of("name", "certExpiryWarningDays", "checkIntervalMinutes", "repeatHours", "webhook",
+                "email"));
+        Notifications d = Notifications.NONE;
+        String name = getString(n, p, "name", null);
+        int certDays = (int) getPositiveLong(n, p, "certExpiryWarningDays", d.certExpiryWarningDays());
+        int interval = (int) getPositiveLong(n, p, "checkIntervalMinutes", d.checkIntervalMinutes());
+        int repeat = d.repeatHours();
+        JsonElement r = n.get("repeatHours");
+        if (r != null && !r.isJsonNull()) {
+            // 0 is allowed here: "notify once".
+            repeat = r.isJsonPrimitive() && r.getAsJsonPrimitive().isNumber() && r.getAsDouble() == 0
+                    ? 0 : (int) getPositiveLong(n, p, "repeatHours", 0);
+        }
+
+        Webhook webhook = null;
+        JsonElement w = n.get("webhook");
+        if (w != null && !w.isJsonNull()) {
+            if (!w.isJsonObject()) throw new ConfigException(p + "webhook must be an object");
+            JsonObject wo = w.getAsJsonObject();
+            String wp = p + "webhook.";
+            checkKeys(wo, wp, Set.of("url", "headers"));
+            String urlString = getString(wo, wp, "url", null);
+            if (urlString == null) throw new ConfigException(wp + "url is required");
+            URI url;
+            try {
+                url = new URI(urlString);
+            } catch (URISyntaxException e) {
+                throw new ConfigException(wp + "url is not a valid URL: " + urlString, e);
+            }
+            if (url.getScheme() == null || !Set.of("http", "https").contains(url.getScheme().toLowerCase(Locale.ROOT))
+                    || url.getHost() == null) {
+                throw new ConfigException(wp + "url must be an http or https URL: " + urlString);
+            }
+            Map<String, String> headers = new LinkedHashMap<>();
+            JsonElement h = wo.get("headers");
+            if (h != null && !h.isJsonNull()) {
+                if (!h.isJsonObject()) throw new ConfigException(wp + "headers must be an object of strings");
+                for (Map.Entry<String, JsonElement> e : h.getAsJsonObject().entrySet()) {
+                    if (!isString(e.getValue())) throw new ConfigException(wp + "headers must be an object of strings");
+                    if (!e.getKey().matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+                            || e.getValue().getAsString().matches("(?s).*[\\r\\n].*")) {
+                        throw new ConfigException(wp + "headers: invalid header " + e.getKey());
+                    }
+                    headers.put(e.getKey(), e.getValue().getAsString());
+                }
+            }
+            webhook = new Webhook(url, headers);
+        }
+
+        Email email = null;
+        JsonElement m = n.get("email");
+        if (m != null && !m.isJsonNull()) {
+            if (!m.isJsonObject()) throw new ConfigException(p + "email must be an object");
+            JsonObject mo = m.getAsJsonObject();
+            String mp = p + "email.";
+            checkKeys(mo, mp, Set.of("host", "port", "security", "username", "password", "from", "to"));
+            String host = getString(mo, mp, "host", null);
+            if (host == null || host.isBlank()) throw new ConfigException(mp + "host is required");
+            String security = getString(mo, mp, "security", "starttls").toLowerCase(Locale.ROOT);
+            int defaultPort = switch (security) {
+                case "starttls" -> 587;
+                case "tls" -> 465;
+                case "none" -> 25;
+                default -> throw new ConfigException(mp + "security must be starttls, tls or none");
+            };
+            long port = getPositiveLong(mo, mp, "port", defaultPort);
+            if (port > 65535) throw new ConfigException(mp + "port out of range");
+            String username = getString(mo, mp, "username", null);
+            String password = getString(mo, mp, "password", null);
+            if ((username == null) != (password == null)) {
+                throw new ConfigException(mp + "username and password must be given together");
+            }
+            String from = getString(mo, mp, "from", null);
+            if (from == null) throw new ConfigException(mp + "from is required");
+            checkAddress(mp + "from", from);
+            List<String> to = new ArrayList<>();
+            JsonElement t = mo.get("to");
+            if (t != null && isString(t)) {
+                to.add(t.getAsString());
+            } else if (t != null && t.isJsonArray()) {
+                for (JsonElement item : t.getAsJsonArray()) {
+                    if (!isString(item)) throw new ConfigException(mp + "to must be an array of addresses");
+                    to.add(item.getAsString());
+                }
+            } else if (t != null && !t.isJsonNull()) {
+                throw new ConfigException(mp + "to must be an array of addresses");
+            }
+            if (to.isEmpty()) throw new ConfigException(mp + "to needs at least one address");
+            for (String a : to) checkAddress(mp + "to", a);
+            email = new Email(host.trim(), (int) port, security, username, password, from, to);
+        }
+
+        return new Notifications(name, certDays, interval, repeat, webhook, email);
+    }
+
+    private static void checkAddress(String what, String address) throws ConfigException {
+        if (!address.matches("[^\\s<>@,;:\"]+@[^\\s<>@,;:\"]+")) {
+            throw new ConfigException(what + ": invalid email address: " + address);
+        }
     }
 
     static InetSocketAddress parseListen(String listen) throws ConfigException {
@@ -170,9 +345,13 @@ public record Config(
     }
 
     private static String getString(JsonObject obj, String key, String def) throws ConfigException {
+        return getString(obj, "", key, def);
+    }
+
+    private static String getString(JsonObject obj, String prefix, String key, String def) throws ConfigException {
         JsonElement el = obj.get(key);
         if (el == null || el.isJsonNull()) return def;
-        if (!isString(el)) throw new ConfigException(key + " must be a string");
+        if (!isString(el)) throw new ConfigException(prefix + key + " must be a string");
         return el.getAsString();
     }
 

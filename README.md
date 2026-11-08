@@ -23,9 +23,73 @@ java -jar PKIServer.jar [--config config.json]
     "uploadsPerMinutePerIp": 60,
     "crlMaxFutureDays": 366,
     "coverageWarningDays": 30
+  },
+  "notifications": {
+    "webhook": {"url": "https://hooks.example.com/pki"}
   }
 }
 ```
+
+## Notifications
+
+Optional. With a `webhook` and/or `email` under `notifications`, the server checks every
+`checkIntervalMinutes` (and at startup) for:
+
+- **CRL coverage running low**: the last `nextUpdate` across a CA's current and pending
+  CRLs is less than `limits.coverageWarningDays` away (`crl-coverage-low`);
+- **stale CRL**: the current CRL is past its `nextUpdate` (`crl-stale`);
+- **signing certificate nearing expiry**: less than `certExpiryWarningDays` left, or
+  already expired while still installed (`signing-cert-expiring`);
+- **published end-entity certificate nearing expiry**: less than `certExpiryWarningDays`
+  left (`cert-expiring`). Once it has expired it is no longer reported.
+
+An alert is sent when it first appears and repeated every `repeatHours` while it stays
+active (`0`: only once). Alerts due at the same check go out together, one message per
+channel. A failed delivery is retried at the next check. Which alerts were sent is kept in
+memory only, so active alerts are sent again after a restart.
+
+```json
+"notifications": {
+  "name": "pki.siggi.io",
+  "certExpiryWarningDays": 30,
+  "checkIntervalMinutes": 60,
+  "repeatHours": 24,
+  "webhook": {
+    "url": "https://hooks.example.com/pki",
+    "headers": {"Authorization": "Bearer …"}
+  },
+  "email": {
+    "host": "smtp.example.com",
+    "port": 587,
+    "security": "starttls",
+    "username": "pki@example.com",
+    "password": "…",
+    "from": "pki@example.com",
+    "to": ["admin@example.com"]
+  }
+}
+```
+
+- `name` identifies the server in messages (default: the host name).
+- The webhook gets a `POST` with a JSON body; any `2xx` counts as delivered. `text` makes
+  it work as-is with Slack/Mattermost-style incoming webhooks:
+
+  ```json
+  {
+    "server": "pki.siggi.io",
+    "text": "PKIServer pki.siggi.io: 1 alert\n- CRL coverage of \"tls2\" runs out at …",
+    "alerts": [{"type": "crl-coverage-low", "slug": "tls2", "at": "2026-12-01T00:00:00Z",
+                "message": "CRL coverage of \"tls2\" runs out at …"}]
+  }
+  ```
+
+  `serial` is added for `cert-expiring`; `at` is when coverage ends, the stale CRL's
+  `nextUpdate`, or the certificate's `notAfter`.
+- Email is plain text over SMTP. `security` is `starttls` (default, port 587; the mail is
+  not sent if the server doesn't offer STARTTLS), `tls` (implicit TLS, port 465) or `none`
+  (port 25). TLS certificates are checked against the JDK trust store and the host name.
+  `username`/`password` (optional, together) use `AUTH PLAIN`. `to` is one address or a
+  list.
 
 ## Deployment
 

@@ -41,6 +41,7 @@ public final class PKIServer {
     private volatile PublicFiles publicFiles;
     private volatile Api api;
     private CrlScheduler crlScheduler;
+    private Notifier notifier;
     private ExecutorService executor;
     private Thread acceptThread;
     private volatile boolean stopping;
@@ -105,6 +106,12 @@ public final class PKIServer {
             // Promote anything that came due while the server was down before serving.
             crlScheduler.runOnce(Clock.systemUTC().instant());
             crlScheduler.start();
+
+            if (config.notifications().enabled()) {
+                notifier = new Notifier(store, Clock.systemUTC(), coverageWarning, config.notifications(),
+                        Notifier.sinks(config.notifications()));
+                notifier.start();
+            }
 
             acceptThread = new Thread(this::acceptLoop, "PKIServer-accept");
             acceptThread.start();
@@ -239,6 +246,7 @@ public final class PKIServer {
         Thread accept;
         ExecutorService exec;
         CrlScheduler scheduler;
+        Notifier notify;
         synchronized (lock) {
             if (!started || stopped) return;
             stopped = true;
@@ -247,6 +255,7 @@ public final class PKIServer {
             accept = acceptThread;
             exec = executor;
             scheduler = crlScheduler;
+            notify = notifier;
         }
         log.info("Shutting down");
         try {
@@ -255,6 +264,7 @@ public final class PKIServer {
             log.log(Level.WARNING, "failed to close listening socket", e);
         }
         if (scheduler != null) scheduler.stop();
+        if (notify != null) notify.stop();
         try {
             accept.join(SHUTDOWN_GRACE_MILLIS);
             long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(SHUTDOWN_GRACE_MILLIS);
