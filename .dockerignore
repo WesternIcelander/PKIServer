@@ -1,0 +1,4 @@
+# Only the shaded jar and the example config go into the image.
+*
+!target/PKIServer-1.0-SNAPSHOT.jar
+!deploy/config.example.json

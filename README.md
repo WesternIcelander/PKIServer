@@ -27,6 +27,14 @@ java -jar PKIServer.jar [--config config.json]
 }
 ```
 
+## Deployment
+
+PKIServer doesn't do TLS: it runs behind a reverse proxy that serves the public files on
+plain HTTP (AIA and CRL Distribution Point fetchers often can't do HTTPS) and `/api/*` on
+HTTPS only. Uploads are accepted only from an address in `trustedProxies` that sets
+`X-Forwarded-Proto: https`. See [`deploy/README.md`](deploy/README.md) for the Docker
+image, an example config, a docker compose + nginx setup and the proxy requirements.
+
 ## Installing roots
 
 Roots (trust anchors) are never accepted over HTTP. They enter the server in one of two

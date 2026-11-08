@@ -1,0 +1,11 @@
+{
+  "listen": "0.0.0.0:8080",
+  "trustedProxies": ["172.30.0.2"],
+  "dataDir": "/data",
+  "limits": {
+    "maxUploadBytes": 1048576,
+    "uploadsPerMinutePerIp": 60,
+    "crlMaxFutureDays": 366,
+    "coverageWarningDays": 30
+  }
+}

@@ -101,4 +101,13 @@ class ConfigTest {
         Config c = Config.load(file);
         assertEquals(dir.toAbsolutePath().resolve("store"), c.dataDir());
     }
+
+    @Test
+    void deploymentExampleConfigIsValid() throws Exception {
+        Config c = Config.load(Path.of("deploy/config.example.json"));
+        assertEquals(8080, c.listen().getPort());
+        assertTrue(c.uploadsEnabled());
+        assertEquals(List.of("172.30.0.2"), c.trustedProxies());
+        assertEquals(Path.of("/data"), c.dataDir());
+    }
 }
