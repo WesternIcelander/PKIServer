@@ -89,6 +89,43 @@ final class ChainValidator {
     }
 
     /**
+     * Re-verifies a certificate that is already stored, for the startup integrity check.
+     * <p>
+     * Like {@link #validate} but independent of the current time and of revocation: stored
+     * objects stay published when they expire or are revoked. Each candidate path is validated
+     * with PKIX at the latest {@code notBefore} on it; whatever passed {@link #validate} when it
+     * was uploaded passes there too, since target and path were then valid at a common instant.
+     *
+     * @param issuerSlug if not null, only paths whose direct issuer has this slug count
+     * @return the issuing signing certificates, the direct issuer first and the root last
+     * @throws ValidationException with a human-readable reason if no such path exists
+     */
+    List<SigningCert> verifyStored(X509Certificate target, String issuerSlug) throws ValidationException {
+        List<SigningCert> roots = new ArrayList<>();
+        for (SigningCert sc : store.signingCerts()) {
+            if (sc.role() == CaRole.ROOT) roots.add(sc);
+        }
+        List<List<SigningCert>> candidates = new ArrayList<>();
+        findPaths(target, new ArrayList<>(), candidates);
+        if (issuerSlug != null) candidates.removeIf(path -> !path.get(0).slug().equals(issuerSlug));
+        if (candidates.isEmpty()) {
+            throw new ValidationException(roots.isEmpty() ? "no root is installed on this server" : noPathReason(target));
+        }
+        String firstProblem = null;
+        for (List<SigningCert> path : candidates) {
+            Instant at = target.getNotBefore().toInstant();
+            for (SigningCert sc : path) {
+                Instant notBefore = sc.cert().getNotBefore().toInstant();
+                if (notBefore.isAfter(at)) at = notBefore;
+            }
+            String problem = pkixProblem(target, path, roots, at);
+            if (problem == null) return List.copyOf(path);
+            if (firstProblem == null) firstProblem = problem;
+        }
+        throw new ValidationException(firstProblem);
+    }
+
+    /**
      * Depth-first search for every chain of installed signing certificates from the issuer of
      * {@code cert} up to an installed root, following subject DN and signature.
      */

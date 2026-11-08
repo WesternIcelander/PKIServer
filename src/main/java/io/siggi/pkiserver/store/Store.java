@@ -96,6 +96,10 @@ public final class Store {
         final TreeMap<BigInteger, StoredCrl> crls = new TreeMap<>();
         final List<DiscardedCrl> discarded = new ArrayList<>();
         final TreeMap<String, EndEntityCert> endEntities = new TreeMap<>();
+        /** Numbers of stored CRLs withheld by {@link #withholdCrl}: still used, never reused. */
+        final List<BigInteger> withheldCrls = new ArrayList<>();
+        /** Serials of stored end-entity certificates withheld by {@link #withholdEndEntityCert}. */
+        final List<String> withheldEndEntities = new ArrayList<>();
 
         CaData(SigningCert cert) {
             this.cert = cert;
@@ -200,6 +204,9 @@ public final class Store {
         BigInteger max = data.crls.isEmpty() ? null : data.crls.lastKey();
         for (DiscardedCrl d : data.discarded) {
             if (max == null || d.number().compareTo(max) > 0) max = d.number();
+        }
+        for (BigInteger n : data.withheldCrls) {
+            if (max == null || n.compareTo(max) > 0) max = n;
         }
         return max;
     }
@@ -310,6 +317,10 @@ public final class Store {
                 throw new StoreException("CRL Number " + number + " was used by a discarded CRL for \"" + slug + "\"");
             }
         }
+        if (data.withheldCrls.contains(number)) {
+            throw new StoreException("CRL Number " + number + " is used by a stored CRL of \"" + slug
+                    + "\" that failed the startup integrity check");
+        }
         StoredCrl stored = new StoredCrl(number, crl, der, X509Util.sha256Hex(der), state,
                 crl.getThisUpdate().toInstant(),
                 crl.getNextUpdate() == null ? null : crl.getNextUpdate().toInstant(),
@@ -393,6 +404,10 @@ public final class Store {
         }
         String serial = X509Util.formatSerial(cert.getSerialNumber());
         byte[] der = X509Util.der(cert);
+        if (data.withheldEndEntities.contains(serial)) {
+            throw new StoreException("a certificate with serial " + serial + " is stored under \"" + slug
+                    + "\" but failed the startup integrity check");
+        }
         EndEntityCert existing = data.endEntities.get(serial);
         if (existing != null) {
             if (Arrays.equals(existing.der(), der)) return false;
@@ -406,6 +421,52 @@ public final class Store {
         writeAtomic(dir.resolve(EE_CERT_FILE), der);
         data.endEntities.put(serial, ee);
         return true;
+    }
+
+    // ------------------------------------------------------------------ withholding
+
+    /*
+     * The startup integrity check withholds stored objects that no longer validate: they are
+     * dropped from memory (so nothing serves or chains through them) but their files stay on
+     * disk, untouched, so fixing the cause (e.g. reinstalling a removed root) and restarting
+     * brings them back. Their slugs, CRL Numbers and serials stay taken meanwhile.
+     */
+
+    /**
+     * Withholds a signing certificate with its CRLs and end-entity certificates. Its directory
+     * stays on disk, so its slug can't be reused until it is removed.
+     *
+     * @throws StoreException if there is no such slug
+     */
+    public synchronized void withholdSigningCert(String slug) throws StoreException {
+        unindex(requireCa(slug));
+    }
+
+    /**
+     * Withholds a stored CRL. Its number still counts as used. If it was the current CRL, the
+     * CA has no current CRL until a new one takes effect.
+     *
+     * @throws StoreException if there is no such CRL
+     */
+    public synchronized void withholdCrl(String slug, BigInteger number) throws StoreException {
+        CaData data = requireCa(slug);
+        if (data.crls.remove(number) == null) {
+            throw new StoreException("no CRL " + number + " for \"" + slug + "\"");
+        }
+        data.withheldCrls.add(number);
+    }
+
+    /**
+     * Withholds a stored end-entity certificate. Its serial stays taken.
+     *
+     * @throws StoreException if there is no such certificate
+     */
+    public synchronized void withholdEndEntityCert(String slug, String serial) throws StoreException {
+        CaData data = requireCa(slug);
+        if (data.endEntities.remove(serial) == null) {
+            throw new StoreException("no certificate " + serial + " under \"" + slug + "\"");
+        }
+        data.withheldEndEntities.add(serial);
     }
 
     // ------------------------------------------------------------------ loading

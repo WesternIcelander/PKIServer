@@ -75,8 +75,9 @@ That's all. `cert.der` may also be PEM (it is rewritten as DER at startup), and
 `meta.json` is created at startup. The directory name is the slug, so it must use only
 `a-z 0-9 - . _ ~`; directories with other names are ignored (and logged). If two
 directories hold certificates with the same subject and key, the first by name wins and
-the other is ignored. Unlike `add-root`, hand-placed files aren't checked for being a
-self-signed CA when loaded, so prefer the CLI unless you have a reason not to.
+the other is ignored. Hand-placed roots go through the same checks as `add-root` in the
+startup integrity check (below), but only when the server starts, so prefer the CLI,
+which reports problems right away.
 
 To remove a CA by hand, stop the server and delete its `ca/<slug>/` directory.
 
@@ -106,6 +107,24 @@ data/
 
 A certificate's role is derived from the certificate itself: it is a root if it is
 self-signed and its signature verifies with its own key, otherwise an intermediate.
+
+### Startup integrity check
+
+At startup the server re-parses every stored file, rebuilds the metadata from the DER, and
+re-verifies everything before serving it:
+
+- roots: self-signed, `CA:TRUE`;
+- intermediates: `CA:TRUE`, `keyCertSign` (if they have a Key Usage), and a valid path
+  (PKIX) through installed intermediates that passed this check to an installed root;
+- CRLs: signed by their CA, which has `cRLSign` (if it has a Key Usage), full CRL,
+  `nextUpdate` after `thisUpdate`;
+- end-entity certificates: not a CA, and a valid path through the CA they are stored under.
+
+Expiry and revocation are not checked here: published objects stay published. Anything
+that fails is logged (`Not serving …`) and withheld: not served, and not used to validate
+other objects (e.g. everything issued below a removed root). Its files stay on disk
+untouched, and its slug, CRL Number or serial stays taken, so fixing the cause (e.g.
+reinstalling the root) and restarting brings it back. Slugs are never re-derived.
 
 ## Public files
 

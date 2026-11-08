@@ -68,6 +68,7 @@ public final class PKIServer {
             started = true;
             Files.createDirectories(config.dataDir());
             store = Store.open(config.dataDir());
+            new IntegrityCheck(store).run();
             Duration coverageWarning = Duration.ofDays(config.limits().coverageWarningDays());
             publicFiles = new PublicFiles(store, coverageWarning);
             api = new Api(config);
