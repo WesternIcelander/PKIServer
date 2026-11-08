@@ -40,6 +40,7 @@ public final class PKIServer {
     private Store store;
     private volatile PublicFiles publicFiles;
     private volatile Api api;
+    private CrlScheduler crlScheduler;
     private ExecutorService executor;
     private Thread acceptThread;
     private volatile boolean stopping;
@@ -70,8 +71,9 @@ public final class PKIServer {
             publicFiles = new PublicFiles(store);
             api = new Api(config);
             api.registerUpload(CertificateUpload.PATH, new CertificateUpload(store, Clock.systemUTC()));
+            crlScheduler = new CrlScheduler(store, Clock.systemUTC());
             api.registerUpload(CrlUpload.PATH, new CrlUpload(store, Clock.systemUTC(),
-                    Duration.ofDays(config.limits().crlMaxFutureDays())));
+                    Duration.ofDays(config.limits().crlMaxFutureDays()), crlScheduler::wakeUp));
 
             executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("PKIServer-http-", 0).factory());
             httpServer = new HTTPServerBuilder()
@@ -96,6 +98,10 @@ public final class PKIServer {
             socket.setReuseAddress(true);
             socket.bind(config.listen());
             serverSocket = socket;
+
+            // Promote anything that came due while the server was down before serving.
+            crlScheduler.runOnce(Clock.systemUTC().instant());
+            crlScheduler.start();
 
             acceptThread = new Thread(this::acceptLoop, "PKIServer-accept");
             acceptThread.start();
@@ -220,6 +226,7 @@ public final class PKIServer {
         ServerSocket socket;
         Thread accept;
         ExecutorService exec;
+        CrlScheduler scheduler;
         synchronized (lock) {
             if (!started || stopped) return;
             stopped = true;
@@ -227,6 +234,7 @@ public final class PKIServer {
             socket = serverSocket;
             accept = acceptThread;
             exec = executor;
+            scheduler = crlScheduler;
         }
         log.info("Shutting down");
         try {
@@ -234,6 +242,7 @@ public final class PKIServer {
         } catch (IOException e) {
             log.log(Level.WARNING, "failed to close listening socket", e);
         }
+        if (scheduler != null) scheduler.stop();
         try {
             accept.join(SHUTDOWN_GRACE_MILLIS);
             long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(SHUTDOWN_GRACE_MILLIS);

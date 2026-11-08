@@ -61,11 +61,22 @@ final class CrlUpload implements Api.UploadHandler {
     private final Store store;
     private final Clock clock;
     private final Duration maxFuture;
+    private final Runnable onPending;
 
     CrlUpload(Store store, Clock clock, Duration maxFuture) {
+        this(store, clock, maxFuture, () -> {
+        });
+    }
+
+    /**
+     * @param onPending called after a CRL was stored as pending (to wake the
+     *                  {@link CrlScheduler} so it can reschedule)
+     */
+    CrlUpload(Store store, Clock clock, Duration maxFuture, Runnable onPending) {
         this.store = store;
         this.clock = clock;
         this.maxFuture = maxFuture;
+        this.onPending = onPending;
     }
 
     /** Result of processing one CRL. */
@@ -260,19 +271,8 @@ final class CrlUpload implements Api.UploadHandler {
 
         // Rule 5: no un-revoking.
         if (current != null) {
-            List<BigInteger> missing = missingSerials(current.crl(), crl);
-            if (!missing.isEmpty()) {
-                StringBuilder sb = new StringBuilder();
-                for (int i = 0; i < missing.size() && i < MAX_LISTED_SERIALS; i++) {
-                    if (i > 0) sb.append(", ");
-                    sb.append(X509Util.formatSerial(missing.get(i)));
-                }
-                if (missing.size() > MAX_LISTED_SERIALS) {
-                    sb.append(" and ").append(missing.size() - MAX_LISTED_SERIALS).append(" more");
-                }
-                throw new Rejection(409, missing.size() + " serial(s) revoked by the current CRL #"
-                        + current.number() + " are missing (certificates can't be un-revoked): " + sb);
-            }
+            String unrevoked = unrevokedError(current, crl);
+            if (unrevoked != null) throw new Rejection(409, unrevoked);
         }
 
         if (immediate) {
@@ -294,7 +294,27 @@ final class CrlUpload implements Api.UploadHandler {
         StoredCrl stored = store.addCrl(slug, crl, CrlState.PENDING, now);
         log.info("CRL #" + number + " of \"" + slug + "\" is pending until " + thisUpdate
                 + " (nextUpdate " + nextUpdate + ")");
+        onPending.run();
         return Outcome.accepted(slug, stored, false, List.of());
+    }
+
+    /**
+     * Rule 5: the error message if {@code next} doesn't list every serial that the current CRL
+     * {@code current} lists, else null.
+     */
+    static String unrevokedError(StoredCrl current, X509CRL next) {
+        List<BigInteger> missing = missingSerials(current.crl(), next);
+        if (missing.isEmpty()) return null;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < missing.size() && i < MAX_LISTED_SERIALS; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(X509Util.formatSerial(missing.get(i)));
+        }
+        if (missing.size() > MAX_LISTED_SERIALS) {
+            sb.append(" and ").append(missing.size() - MAX_LISTED_SERIALS).append(" more");
+        }
+        return missing.size() + " serial(s) revoked by the current CRL #" + current.number()
+                + " are missing (certificates can't be un-revoked): " + sb;
     }
 
     /** Serials listed in {@code previous} but not in {@code next}, in increasing order. */
