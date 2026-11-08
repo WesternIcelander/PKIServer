@@ -120,3 +120,29 @@ Served over plain HTTP, for `GET` and `HEAD`:
 Responses carry an `ETag` (and, for certificates, `Last-Modified`), and conditional
 requests (`If-None-Match`, `If-Modified-Since`) get `304 Not Modified`. Certificates are
 cacheable for an hour; the index page is `no-cache`.
+
+## CRL coverage report
+
+`GET /api/crl/<slug>` (read-only, no upload needed, but like all of `/api/*` only over
+HTTPS through a trusted proxy) returns JSON describing a CA's CRLs:
+
+```json
+{
+  "slug": "tls2",
+  "now": "2026-11-08T00:00:00Z",
+  "current": {"number": "2", "thisUpdate": "…", "nextUpdate": "…", "sha256": "…", "stale": false},
+  "pending": [{"number": "3", "thisUpdate": "…", "nextUpdate": "…", "sha256": "…"}],
+  "highestCrlNumber": "3",
+  "nextCrlNumber": "4",
+  "coverageUntil": "2026-11-28T00:00:00Z",
+  "coverageRemainingSeconds": 1728000,
+  "coverageWarningDays": 30,
+  "coverageWarning": true
+}
+```
+
+`highestCrlNumber` counts every CRL ever accepted, including superseded and discarded
+ones, so the next CRL must use at least `nextCrlNumber`. `coverageUntil` is the last
+`nextUpdate` across the current and pending CRLs. `coverageWarning` is set when that is
+less than `limits.coverageWarningDays` away (or already past). The index page shows the
+same information per CA.

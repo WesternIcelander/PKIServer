@@ -11,6 +11,7 @@ import io.siggi.pkiserver.x509.X509Util;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -46,9 +47,11 @@ final class PublicFiles {
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'", Locale.ROOT).withZone(ZoneOffset.UTC);
 
     private final Store store;
+    private final Duration coverageWarning;
 
-    PublicFiles(Store store) {
+    PublicFiles(Store store, Duration coverageWarning) {
         this.store = store;
+        this.coverageWarning = coverageWarning;
     }
 
     /**
@@ -254,7 +257,8 @@ final class PublicFiles {
             sb.append("<p class=\"muted\">No signing certificates are installed.</p>\n");
         } else {
             sb.append("<table>\n<tr><th>Name</th><th>Subject</th><th>Role</th><th>Issuer</th><th>Validity</th>")
-                    .append("<th>Download</th><th>CRL</th><th>CRL coverage until</th></tr>\n");
+                    .append("<th>Download</th><th>Current CRL</th><th>Pending CRLs</th>")
+                    .append("<th>Highest CRL number</th><th>CRL coverage until</th></tr>\n");
             for (SigningCert cert : certs) {
                 appendRow(sb, cert, now);
             }
@@ -283,18 +287,8 @@ final class PublicFiles {
         sb.append("<td><a href=\"").append(href).append(".der\">DER</a> &middot; <a href=\"")
                 .append(href).append(".pem\">PEM</a></td>");
 
-        List<StoredCrl> crls = store.crls(slug);
-        StoredCrl current = null;
-        int pending = 0;
-        Instant coverage = null;
-        for (StoredCrl crl : crls) {
-            if (crl.state() == CrlState.CURRENT) current = crl;
-            if (crl.state() == CrlState.PENDING) pending++;
-            if ((crl.state() == CrlState.CURRENT || crl.state() == CrlState.PENDING) && crl.nextUpdate() != null
-                    && (coverage == null || crl.nextUpdate().isAfter(coverage))) {
-                coverage = crl.nextUpdate();
-            }
-        }
+        CrlCoverage coverage = CrlCoverage.of(store, slug, now, coverageWarning);
+        StoredCrl current = coverage.current();
         sb.append("<td>");
         if (current == null) {
             sb.append("<span class=\"muted\">none</span>");
@@ -302,18 +296,48 @@ final class PublicFiles {
             sb.append("<a href=\"").append(href).append(".crl\">#").append(current.number()).append("</a>")
                     .append(" (<a href=\"").append(href).append(".crl.pem\">PEM</a>), next update ");
             sb.append(current.nextUpdate() == null ? "none" : DISPLAY_DATE.format(current.nextUpdate()));
-            if (current.nextUpdate() != null && now.isAfter(current.nextUpdate())) {
+            if (coverage.stale()) {
                 sb.append(" <span class=\"warn\">stale</span>");
             }
         }
-        if (pending > 0) {
-            sb.append("<br>").append(pending).append(" pending");
+        sb.append("</td><td>");
+        if (coverage.pending().isEmpty()) {
+            sb.append("<span class=\"muted\">none</span>");
+        } else {
+            boolean first = true;
+            for (StoredCrl crl : coverage.pending()) {
+                if (!first) sb.append("<br>");
+                first = false;
+                sb.append("#").append(crl.number()).append(": ").append(DISPLAY_DATE.format(crl.thisUpdate()))
+                        .append(" &ndash; ")
+                        .append(crl.nextUpdate() == null ? "none" : DISPLAY_DATE.format(crl.nextUpdate()));
+            }
         }
         sb.append("</td><td>");
-        if (coverage == null) {
+        if (coverage.highestNumber() == null) {
+            sb.append("<span class=\"muted\">none</span>");
+        } else {
+            sb.append("#").append(coverage.highestNumber())
+                    .append("<br><span class=\"muted\">next: #").append(coverage.nextNumber()).append("</span>");
+        }
+        sb.append("</td><td>");
+        if (coverage.coverageUntil() == null) {
             sb.append("<span class=\"muted\">&ndash;</span>");
         } else {
-            sb.append(DISPLAY_DATE.format(coverage));
+            sb.append(DISPLAY_DATE.format(coverage.coverageUntil()));
+            if (coverage.warning()) {
+                Duration remaining = coverage.remaining();
+                sb.append("<br><span class=\"warn\">");
+                if (remaining.isNegative() || remaining.isZero()) {
+                    sb.append("coverage has run out");
+                } else {
+                    long days = remaining.toDays();
+                    sb.append("coverage runs out in ")
+                            .append(days > 0 ? days + (days == 1 ? " day" : " days")
+                                    : remaining.toHours() + (remaining.toHours() == 1 ? " hour" : " hours"));
+                }
+                sb.append("</span>");
+            }
         }
         sb.append("</td></tr>\n");
     }

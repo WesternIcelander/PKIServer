@@ -40,10 +40,20 @@ final class Api {
         void handle(HTTPRequest request, byte[] body) throws Exception;
     }
 
+    /**
+     * Handles a read-only {@code GET}/{@code HEAD} of {@code <prefix><rest>}, after the gate.
+     * {@code rest} is the (non-empty, slash-free) path after the registered prefix.
+     */
+    @FunctionalInterface
+    interface GetHandler {
+        void handle(HTTPRequest request, String rest) throws Exception;
+    }
+
     private final Config config;
     private final List<IP> trustedProxies;
     private final RateLimiter rateLimiter;
     private final Map<String, UploadHandler> uploads = new ConcurrentHashMap<>();
+    private final Map<String, GetHandler> reads = new ConcurrentHashMap<>();
 
     Api(Config config) {
         this(config, new RateLimiter(config.limits().uploadsPerMinutePerIp()));
@@ -70,6 +80,16 @@ final class Api {
     }
 
     /**
+     * Registers a read-only endpoint {@code GET <prefix><name>}, e.g. {@code /api/crl/} for
+     * {@code GET /api/crl/tls2}. It's behind the same HTTPS gate as uploads, but isn't rate
+     * limited and has no body.
+     */
+    void registerGet(String prefix, GetHandler handler) {
+        if (!isApiPath(prefix) || !prefix.endsWith("/")) throw new IllegalArgumentException("bad API prefix: " + prefix);
+        reads.put(prefix, handler);
+    }
+
+    /**
      * Handles a request for an {@link #isApiPath API path}.
      *
      * @param peer the address the TCP connection actually comes from (not X-Forwarded-For)
@@ -85,6 +105,7 @@ final class Api {
 
         UploadHandler upload = uploads.get(request.url);
         if (upload == null) {
+            if (handleGet(request)) return;
             error(request, 404, "Not Found", "no such API endpoint", true);
             return;
         }
@@ -113,6 +134,22 @@ final class Api {
             return;
         }
         upload.handle(request, body);
+    }
+
+    /** Dispatches to a {@link #registerGet read-only endpoint}, if one matches. */
+    private boolean handleGet(HTTPRequest request) throws Exception {
+        String path = request.url;
+        int slash = path.lastIndexOf('/');
+        if (slash < 0 || slash == path.length() - 1) return false;
+        GetHandler handler = reads.get(path.substring(0, slash + 1));
+        if (handler == null) return false;
+        if (!request.method.equals("GET") && !request.method.equals("HEAD")) {
+            request.response.setHeader("Allow", "GET, HEAD");
+            error(request, 405, "Method Not Allowed", "use GET", true);
+            return true;
+        }
+        handler.handle(request, path.substring(slash + 1));
+        return true;
     }
 
     /**
@@ -205,7 +242,11 @@ final class Api {
         response.setHeader("Cache-Control", "no-store");
         response.setContentType(JSON);
         response.contentLength(body.length);
-        if (!request.method.equals("HEAD")) response.write(body);
+        if (request.method.equals("HEAD")) {
+            response.sendHeaders();
+        } else {
+            response.write(body);
+        }
     }
 
     /**
@@ -223,6 +264,10 @@ final class Api {
         response.setContentType(JSON);
         if (closeConnection) response.keepAlive(false);
         response.contentLength(body.length);
-        if (!request.method.equals("HEAD")) response.write(body);
+        if (request.method.equals("HEAD")) {
+            response.sendHeaders();
+        } else {
+            response.write(body);
+        }
     }
 }

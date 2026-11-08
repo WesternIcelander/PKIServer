@@ -68,12 +68,14 @@ public final class PKIServer {
             started = true;
             Files.createDirectories(config.dataDir());
             store = Store.open(config.dataDir());
-            publicFiles = new PublicFiles(store);
+            Duration coverageWarning = Duration.ofDays(config.limits().coverageWarningDays());
+            publicFiles = new PublicFiles(store, coverageWarning);
             api = new Api(config);
             api.registerUpload(CertificateUpload.PATH, new CertificateUpload(store, Clock.systemUTC()));
             crlScheduler = new CrlScheduler(store, Clock.systemUTC());
             api.registerUpload(CrlUpload.PATH, new CrlUpload(store, Clock.systemUTC(),
                     Duration.ofDays(config.limits().crlMaxFutureDays()), crlScheduler::wakeUp));
+            api.registerGet(CrlCoverage.API_PREFIX, CrlCoverage.apiHandler(store, Clock.systemUTC(), coverageWarning));
 
             executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("PKIServer-http-", 0).factory());
             httpServer = new HTTPServerBuilder()
