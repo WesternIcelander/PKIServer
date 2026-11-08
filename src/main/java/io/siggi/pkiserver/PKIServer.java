@@ -13,6 +13,7 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.nio.file.Files;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -69,6 +70,8 @@ public final class PKIServer {
             publicFiles = new PublicFiles(store);
             api = new Api(config);
             api.registerUpload(CertificateUpload.PATH, new CertificateUpload(store, Clock.systemUTC()));
+            api.registerUpload(CrlUpload.PATH, new CrlUpload(store, Clock.systemUTC(),
+                    Duration.ofDays(config.limits().crlMaxFutureDays())));
 
             executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("PKIServer-http-", 0).factory());
             httpServer = new HTTPServerBuilder()
