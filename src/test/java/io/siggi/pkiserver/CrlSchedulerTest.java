@@ -100,6 +100,18 @@ class CrlSchedulerTest {
     }
 
     @Test
+    void staleCurrentCrlIsDetected() throws Exception {
+        store().addCrl(SLUG, crl(1, NOW.minus(Duration.ofDays(1))), CrlState.CURRENT, NOW);
+        CrlScheduler scheduler = new CrlScheduler(store, Clock.systemUTC());
+        assertFalse(scheduler.checkStale(SLUG, NOW));
+        assertTrue(scheduler.checkStale(SLUG, NOW.plus(Duration.ofDays(7))));
+        // Stays current (and served) when stale.
+        scheduler.runOnce(NOW.plus(Duration.ofDays(7)));
+        assertEquals(CrlState.CURRENT, state(1));
+        assertFalse(scheduler.checkStale("unknown", NOW));
+    }
+
+    @Test
     void nothingDueChangesNothing() throws Exception {
         store().addCrl(SLUG, crl(1, NOW.minus(Duration.ofHours(1))), CrlState.CURRENT, NOW);
         store.addCrl(SLUG, crl(2, NOW.plus(Duration.ofDays(1))), CrlState.PENDING, NOW);

@@ -21,14 +21,25 @@ import java.util.Locale;
 
 /**
  * Serves the public, read-only files: signing certificates at {@code /<slug>.der}
- * (alias {@code .crt}) and {@code /<slug>.pem}, and the index page at {@code /}.
+ * (alias {@code .crt}) and {@code /<slug>.pem}, their current CRLs at {@code /<slug>.crl} and
+ * {@code /<slug>.crl.pem}, and the index page at {@code /}.
+ * <p>
+ * A current CRL that is past its {@code nextUpdate} is still served (better than a 404), with
+ * {@code max-age=0}; the index page flags it as stale and the {@link CrlScheduler} logs it.
  */
 final class PublicFiles {
     static final String PKIX_CERT = "application/pkix-cert";
+    static final String PKIX_CRL = "application/pkix-crl";
     static final String PEM = "application/x-pem-file";
     static final String HTML = "text/html; charset=utf-8";
     /** Signing certificates don't change under a slug, but can be removed: cache for an hour. */
     static final long CERT_MAX_AGE_SECONDS = 3600;
+    /**
+     * Cap on a CRL's max-age, so a newly uploaded CRL (e.g. an emergency revocation) propagates
+     * quickly. The max-age also never extends past the CRL's nextUpdate, nor past the moment a
+     * pending CRL takes over.
+     */
+    static final long CRL_MAX_AGE_SECONDS = 3600;
 
     private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter.RFC_1123_DATE_TIME.withZone(ZoneOffset.UTC);
     private static final DateTimeFormatter DISPLAY_DATE =
@@ -54,38 +65,48 @@ final class PublicFiles {
         }
         if (!path.startsWith("/") || path.indexOf('/', 1) >= 0) return false;
         String name = path.substring(1);
-        Format format = Format.of(name);
-        if (format == null) return false;
-        String slug = name.substring(0, name.length() - format.suffix.length());
-        if (!Store.isStorableSlug(slug)) return false;
-        SigningCert cert = store.signingCert(slug);
-        if (cert == null) return false;
-        if (!allowGet(request)) return true;
-        serveCert(request, cert, format);
-        return true;
+        // Longest suffix first: "/tls2.crl.pem" is tls2's CRL, unless there is no "tls2" but
+        // there is a (hand-installed) "tls2.crl", in which case it's that one's certificate.
+        for (Format format : Format.values()) {
+            if (!name.endsWith(format.suffix)) continue;
+            String slug = name.substring(0, name.length() - format.suffix.length());
+            if (!Store.isStorableSlug(slug)) continue;
+            SigningCert cert = store.signingCert(slug);
+            if (cert == null) continue;
+            if (format.crl) {
+                StoredCrl crl = store.currentCrl(slug);
+                if (crl == null) return false;
+                if (!allowGet(request)) return true;
+                serveCrl(request, slug, crl, format);
+            } else {
+                if (!allowGet(request)) return true;
+                serveCert(request, cert, format);
+            }
+            return true;
+        }
+        return false;
     }
 
+    /** URL suffixes, longest first. */
     private enum Format {
-        DER(".der"), CRT(".crt"), PEM(".pem");
+        CRL_PEM(".crl.pem", true, true), CRL(".crl", true, false),
+        DER(".der", false, false), CRT(".crt", false, false), PEM(".pem", false, true);
 
         final String suffix;
+        final boolean crl;
+        final boolean pem;
 
-        Format(String suffix) {
+        Format(String suffix, boolean crl, boolean pem) {
             this.suffix = suffix;
-        }
-
-        static Format of(String name) {
-            for (Format f : values()) {
-                if (name.endsWith(f.suffix)) return f;
-            }
-            return null;
+            this.crl = crl;
+            this.pem = pem;
         }
     }
 
     private void serveCert(HTTPRequest request, SigningCert cert, Format format) throws Exception {
         byte[] body;
         String contentType;
-        if (format == Format.PEM) {
+        if (format.pem) {
             body = X509Util.pem(cert.cert()).getBytes(StandardCharsets.US_ASCII);
             contentType = PEM;
         } else {
@@ -93,11 +114,62 @@ final class PublicFiles {
             contentType = PKIX_CERT;
         }
         // The ETag identifies the certificate; PEM and DER are different representations.
-        String etag = "\"" + cert.sha256() + (format == Format.PEM ? "-pem" : "") + "\"";
+        String etag = "\"" + cert.sha256() + (format.pem ? "-pem" : "") + "\"";
         Instant lastModified = store.signingCertModified(cert.slug());
         HTTPResponse response = request.response;
         response.setHeader("Cache-Control", "public, max-age=" + CERT_MAX_AGE_SECONDS);
         send(request, contentType, body, etag, lastModified);
+    }
+
+    private void serveCrl(HTTPRequest request, String slug, StoredCrl crl, Format format) throws Exception {
+        byte[] body;
+        String contentType;
+        if (format.pem) {
+            body = X509Util.pem(crl.crl()).getBytes(StandardCharsets.US_ASCII);
+            contentType = PEM;
+        } else {
+            body = crl.der();
+            contentType = PKIX_CRL;
+        }
+        String etag = "\"" + crl.sha256() + (format.pem ? "-pem" : "") + "\"";
+        Instant now = Instant.now();
+        Instant nextPending = null;
+        for (StoredCrl c : store.crls(slug)) {
+            if (c.state() == CrlState.PENDING && (nextPending == null || c.thisUpdate().isBefore(nextPending))) {
+                nextPending = c.thisUpdate();
+            }
+        }
+        long maxAge = crlMaxAge(now, crl.nextUpdate(), nextPending);
+        request.response.setHeader("Cache-Control", "public, max-age=" + maxAge);
+        send(request, contentType, body, etag, crlPublished(crl, now));
+    }
+
+    /**
+     * Seconds a CRL may be cached: at most {@link #CRL_MAX_AGE_SECONDS}, never past its
+     * {@code nextUpdate} nor past the moment the next pending CRL takes effect, and 0 once stale.
+     */
+    static long crlMaxAge(Instant now, Instant nextUpdate, Instant nextPendingThisUpdate) {
+        long maxAge = CRL_MAX_AGE_SECONDS;
+        if (nextUpdate != null) maxAge = Math.min(maxAge, secondsUntil(now, nextUpdate));
+        if (nextPendingThisUpdate != null) maxAge = Math.min(maxAge, secondsUntil(now, nextPendingThisUpdate));
+        return maxAge;
+    }
+
+    private static long secondsUntil(Instant now, Instant then) {
+        if (!then.isAfter(now)) return 0;
+        // Round down, so the cache entry expires at or before the deadline.
+        return Math.max(0, then.getEpochSecond() - now.getEpochSecond() - (now.getNano() > 0 ? 1 : 0));
+    }
+
+    /**
+     * When the CRL started being served at its URL: when it was received, or for a pre-signed
+     * CRL, its thisUpdate (when it got promoted). Never in the future.
+     */
+    static Instant crlPublished(StoredCrl crl, Instant now) {
+        Instant t = crl.receivedAt();
+        if (crl.thisUpdate() != null && (t == null || crl.thisUpdate().isAfter(t))) t = crl.thisUpdate();
+        if (t == null || t.isAfter(now)) t = now;
+        return t;
     }
 
     private void serveIndex(HTTPRequest request) throws Exception {
@@ -227,7 +299,8 @@ final class PublicFiles {
         if (current == null) {
             sb.append("<span class=\"muted\">none</span>");
         } else {
-            sb.append("#").append(current.number()).append(", next update ");
+            sb.append("<a href=\"").append(href).append(".crl\">#").append(current.number()).append("</a>")
+                    .append(" (<a href=\"").append(href).append(".crl.pem\">PEM</a>), next update ");
             sb.append(current.nextUpdate() == null ? "none" : DISPLAY_DATE.format(current.nextUpdate()));
             if (current.nextUpdate() != null && now.isAfter(current.nextUpdate())) {
                 sb.append(" <span class=\"warn\">stale</span>");

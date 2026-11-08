@@ -94,9 +94,13 @@ class PublicFilesTest {
 
     private static X509CRL crl() throws Exception {
         Instant now = Instant.now().truncatedTo(ChronoUnit.SECONDS);
-        X509v2CRLBuilder b = new X509v2CRLBuilder(new X500Name("CN=Siggi.io"), Date.from(now.minusSeconds(60)));
-        b.setNextUpdate(Date.from(now.plus(Duration.ofDays(7))));
-        b.addExtension(Extension.cRLNumber, false, new CRLNumber(BigInteger.valueOf(42)));
+        return crl(42, now.minusSeconds(60), now.plus(Duration.ofDays(7)));
+    }
+
+    private static X509CRL crl(long number, Instant thisUpdate, Instant nextUpdate) throws Exception {
+        X509v2CRLBuilder b = new X509v2CRLBuilder(new X500Name("CN=Siggi.io"), Date.from(thisUpdate));
+        b.setNextUpdate(Date.from(nextUpdate));
+        b.addExtension(Extension.cRLNumber, false, new CRLNumber(BigInteger.valueOf(number)));
         return new JcaX509CRLConverter().getCRL(
                 b.build(new JcaContentSignerBuilder("SHA256withECDSA").build(rootKey.getPrivate())));
     }
@@ -187,6 +191,82 @@ class PublicFilesTest {
                 "/..der", "/TLS2.der", "/.der"}) {
             assertEquals(404, get(path).statusCode(), path);
         }
+    }
+
+    @Test
+    void servesCrl() throws Exception {
+        X509CRL expected = server.getStore().currentCrl("siggi.io").crl();
+        HttpResponse<byte[]> r = get("/siggi.io.crl");
+        assertEquals(200, r.statusCode());
+        assertEquals("application/pkix-crl", r.headers().firstValue("Content-Type").orElseThrow());
+        assertArrayEquals(expected.getEncoded(), r.body());
+        String etag = r.headers().firstValue("ETag").orElseThrow();
+        assertTrue(r.headers().firstValue("Last-Modified").isPresent());
+        String cc = r.headers().firstValue("Cache-Control").orElseThrow();
+        long maxAge = Long.parseLong(cc.replaceAll(".*max-age=(\\d+).*", "$1"));
+        assertTrue(maxAge > 3000 && maxAge <= PublicFiles.CRL_MAX_AGE_SECONDS, cc);
+
+        HttpResponse<byte[]> pem = get("/siggi.io.crl.pem");
+        assertEquals(200, pem.statusCode());
+        assertEquals("application/x-pem-file", pem.headers().firstValue("Content-Type").orElseThrow());
+        assertTrue(new String(pem.body(), StandardCharsets.US_ASCII).startsWith("-----BEGIN X509 CRL-----"));
+        assertEquals(expected, X509Util.parseCrls(pem.body()).get(0));
+        assertNotEquals(etag, pem.headers().firstValue("ETag").orElseThrow());
+
+        r = client.send(req("/siggi.io.crl").header("If-None-Match", etag).build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(304, r.statusCode());
+
+        // A CA without a current CRL, and unknown slugs: 404.
+        assertEquals(404, get("/tls2.crl").statusCode());
+        assertEquals(404, get("/tls2.crl.pem").statusCode());
+        assertEquals(404, get("/nope.crl").statusCode());
+        assertEquals(405, client.send(req("/siggi.io.crl").POST(HttpRequest.BodyPublishers.ofString("x")).build(),
+                HttpResponse.BodyHandlers.ofByteArray()).statusCode());
+
+        String html = new String(get("/").body(), StandardCharsets.UTF_8);
+        assertTrue(html.contains("href=\"/siggi.io.crl\""), html);
+        assertTrue(html.contains("href=\"/siggi.io.crl.pem\""), html);
+        assertFalse(html.contains("stale"), html);
+    }
+
+    @Test
+    void staleCrlIsStillServedAndFlagged(@TempDir Path other) throws Exception {
+        Instant now = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+        Store store = Store.open(other.resolve("data"));
+        store.addSigningCert("siggi.io", root);
+        X509CRL stale = crl(7, now.minus(Duration.ofDays(8)), now.minus(Duration.ofDays(1)));
+        store.addCrl("siggi.io", stale, CrlState.CURRENT, now.minus(Duration.ofDays(8)));
+        PKIServer s = new PKIServer(Config.parse("{\"listen\": \"127.0.0.1:0\", \"dataDir\": \"data\"}", other));
+        s.start();
+        try {
+            String base = "http://127.0.0.1:" + s.getPort();
+            HttpResponse<byte[]> r = client.send(HttpRequest.newBuilder(URI.create(base + "/siggi.io.crl")).build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            assertEquals(200, r.statusCode());
+            assertArrayEquals(stale.getEncoded(), r.body());
+            assertEquals("public, max-age=0", r.headers().firstValue("Cache-Control").orElseThrow());
+            String html = client.send(HttpRequest.newBuilder(URI.create(base + "/")).build(),
+                    HttpResponse.BodyHandlers.ofString()).body();
+            assertTrue(html.contains("#7</a>"), html);
+            assertTrue(html.contains("class=\"warn\">stale"), html);
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
+    void crlMaxAge() {
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        long cap = PublicFiles.CRL_MAX_AGE_SECONDS;
+        assertEquals(cap, PublicFiles.crlMaxAge(now, now.plus(Duration.ofDays(7)), null));
+        assertEquals(cap, PublicFiles.crlMaxAge(now, null, null));
+        assertEquals(600, PublicFiles.crlMaxAge(now, now.plusSeconds(600), null));
+        assertEquals(0, PublicFiles.crlMaxAge(now, now, null));
+        assertEquals(0, PublicFiles.crlMaxAge(now, now.minusSeconds(5), null));
+        assertEquals(120, PublicFiles.crlMaxAge(now, now.plus(Duration.ofDays(7)), now.plusSeconds(120)));
+        // Rounded down, so caching never extends past the deadline.
+        assertEquals(599, PublicFiles.crlMaxAge(now.plusMillis(1), now.plusSeconds(600), null));
     }
 
     @Test

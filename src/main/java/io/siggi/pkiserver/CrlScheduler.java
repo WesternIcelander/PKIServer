@@ -13,6 +13,8 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -29,6 +31,9 @@ import java.util.logging.Logger;
  * The background thread runs at start (catching up on anything that came due while the server
  * was down), then wakes at the earliest pending {@code thisUpdate}, at least once a minute, and
  * whenever {@link #wakeUp()} is called (after a pending CRL was uploaded).
+ * <p>
+ * Each run also checks whether a current CRL is past its {@code nextUpdate} (it keeps being
+ * served, but relying parties will treat it as stale) and logs a warning, once per CRL.
  */
 final class CrlScheduler {
     private static final Logger log = Logging.get(CrlScheduler.class);
@@ -44,6 +49,8 @@ final class CrlScheduler {
     private boolean wakeRequested;
     private boolean stopped;
     private Thread thread;
+    /** "slug#number" of the stale current CRLs already warned about. */
+    private final Set<String> staleWarned = ConcurrentHashMap.newKeySet();
 
     CrlScheduler(Store store, Clock clock) {
         this.store = store;
@@ -131,6 +138,7 @@ final class CrlScheduler {
             } catch (IOException | StoreException e) {
                 log.log(Level.SEVERE, "Could not update the CRLs of \"" + sc.slug() + "\"", e);
             }
+            checkStale(sc.slug(), now);
             for (StoredCrl c : store.crls(sc.slug())) {
                 if (c.state() == CrlState.PENDING && (next == null || c.thisUpdate().isBefore(next))) {
                     next = c.thisUpdate();
@@ -138,6 +146,28 @@ final class CrlScheduler {
             }
         }
         return next;
+    }
+
+    /**
+     * Logs a warning, once per CRL, if the current CRL of {@code slug} is past its nextUpdate.
+     *
+     * @return true if the current CRL is stale
+     */
+    boolean checkStale(String slug, Instant now) {
+        StoredCrl current = store.currentCrl(slug);
+        if (current == null || current.nextUpdate() == null || !now.isAfter(current.nextUpdate())) {
+            // Forget CRLs that are no longer current/stale, so the set can't grow forever.
+            staleWarned.removeIf(k -> k.startsWith(slug + "#"));
+            return false;
+        }
+        String key = slug + "#" + current.number();
+        staleWarned.removeIf(k -> k.startsWith(slug + "#") && !k.equals(key));
+        if (staleWarned.add(key)) {
+            log.warning("Current CRL #" + current.number() + " of \"" + slug + "\" is stale: its nextUpdate "
+                    + current.nextUpdate() + " has passed and no newer CRL is available. Still serving it;"
+                    + " upload a new CRL.");
+        }
+        return true;
     }
 
     /**
