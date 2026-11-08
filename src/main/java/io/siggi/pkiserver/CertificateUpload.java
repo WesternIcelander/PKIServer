@@ -19,13 +19,20 @@ import java.util.List;
 import java.util.logging.Logger;
 
 /**
- * {@code POST /api/certificate}: uploads of signing (CA) certificates.
+ * {@code POST /api/certificate}: uploads of signing (CA) and end-entity certificates.
  * <p>
  * The body is one DER certificate or PEM with one or more. Each {@code CA:TRUE} certificate
  * is published under the slug derived from its subject CN if it chains to an installed root
  * through installed intermediates ({@link ChainValidator}), has {@code keyCertSign} (when it
  * has a Key Usage extension), isn't expired, and its slug is free. Re-uploading a certificate
  * that is already installed is a no-op.
+ * <p>
+ * Every other certificate is an end-entity certificate. It is published under the slug of its
+ * issuing signing certificate, by serial, if it chains to an installed root through installed
+ * intermediates (certificates in the body are only used for this once they are installed
+ * themselves), isn't revoked by a current CRL on the path and isn't expired. Re-uploading the
+ * identical certificate is a no-op; a different certificate with the same issuer and serial
+ * is a {@code 409} conflict.
  * <p>
  * The certificates of one body are processed together: one whose issuer is installed by an
  * earlier certificate of the same body is retried, so a chain can be uploaded in any order.
@@ -49,17 +56,30 @@ final class CertificateUpload implements Api.UploadHandler {
     }
 
     /** Result of processing one certificate. */
-    private record Outcome(String result, int status, String slug, String error, boolean retryable) {
+    private record Outcome(String result, int status, String slug, String error, boolean retryable,
+                           boolean endEntity) {
         static Outcome installed(String slug) {
-            return new Outcome("installed", 200, slug, null, false);
+            return new Outcome("installed", 200, slug, null, false, false);
         }
 
         static Outcome unchanged(String slug) {
-            return new Outcome("unchanged", 200, slug, null, false);
+            return new Outcome("unchanged", 200, slug, null, false, false);
+        }
+
+        static Outcome published(String slug) {
+            return new Outcome("published", 200, slug, null, false, true);
+        }
+
+        static Outcome unchangedEndEntity(String slug) {
+            return new Outcome("unchanged", 200, slug, null, false, true);
         }
 
         static Outcome rejected(int status, String slug, String error) {
-            return new Outcome("rejected", status, slug, error, false);
+            return new Outcome("rejected", status, slug, error, false, false);
+        }
+
+        static Outcome retryable(String error) {
+            return new Outcome("rejected", 400, null, error, true, false);
         }
 
         boolean accepted() {
@@ -120,10 +140,7 @@ final class CertificateUpload implements Api.UploadHandler {
     }
 
     private Outcome process(X509Certificate cert) throws IOException {
-        if (cert.getBasicConstraints() < 0) {
-            return Outcome.rejected(400, null,
-                    "not a CA certificate; end-entity certificate uploads are not supported yet");
-        }
+        if (cert.getBasicConstraints() < 0) return processEndEntity(cert);
         String sha256 = X509Util.sha256Hex(X509Util.der(cert));
         for (SigningCert sc : store.signingCerts()) {
             if (sc.sha256().equals(sha256)) return Outcome.unchanged(sc.slug());
@@ -139,7 +156,7 @@ final class CertificateUpload implements Api.UploadHandler {
         try {
             validator.validate(cert, clock.instant());
         } catch (ChainValidator.ValidationException e) {
-            return new Outcome("rejected", 400, null, e.getMessage(), true);
+            return Outcome.retryable(e.getMessage());
         }
 
         String cn = X509Util.commonName(cert.getSubjectX500Principal());
@@ -167,6 +184,32 @@ final class CertificateUpload implements Api.UploadHandler {
         return Outcome.installed(slug);
     }
 
+    private Outcome processEndEntity(X509Certificate cert) throws IOException {
+        List<SigningCert> path;
+        try {
+            path = validator.validate(cert, clock.instant());
+        } catch (ChainValidator.ValidationException e) {
+            return Outcome.retryable(e.getMessage());
+        }
+        String slug = path.get(0).slug();
+        String serial = X509Util.formatSerial(cert.getSerialNumber());
+        boolean added;
+        try {
+            added = store.addEndEntityCert(slug, cert, clock.instant());
+        } catch (StoreException e) {
+            String message = store.endEntityCert(slug, serial) != null
+                    ? "a different certificate with issuer " + cert.getIssuerX500Principal().getName()
+                    + " and serial " + serial + " is already published under \"" + slug
+                    + "\"; serial numbers must be unique per issuer"
+                    : e.getMessage();
+            return Outcome.rejected(409, slug, message);
+        }
+        if (!added) return Outcome.unchangedEndEntity(slug);
+        log.info("Published end-entity certificate " + cert.getSubjectX500Principal().getName()
+                + " under \"" + slug + "\" as " + serial);
+        return Outcome.published(slug);
+    }
+
     private static boolean isSelfSigned(X509Certificate cert) {
         if (!cert.getSubjectX500Principal().equals(cert.getIssuerX500Principal())) return false;
         try {
@@ -189,9 +232,16 @@ final class CertificateUpload implements Api.UploadHandler {
             j.addProperty("notBefore", notBefore.toString());
             j.addProperty("notAfter", cert.getNotAfter().toInstant().toString());
             JsonObject urls = new JsonObject();
-            urls.addProperty("der", "/" + o.slug() + ".der");
-            urls.addProperty("crt", "/" + o.slug() + ".crt");
-            urls.addProperty("pem", "/" + o.slug() + ".pem");
+            if (o.endEntity()) {
+                String base = "/" + o.slug() + "/" + X509Util.formatSerial(cert.getSerialNumber()) + "/";
+                urls.addProperty("certificate", base + "certificate.pem");
+                urls.addProperty("chain", base + "chain.pem");
+                urls.addProperty("fullchain", base + "fullchain.pem");
+            } else {
+                urls.addProperty("der", "/" + o.slug() + ".der");
+                urls.addProperty("crt", "/" + o.slug() + ".crt");
+                urls.addProperty("pem", "/" + o.slug() + ".pem");
+            }
             j.add("urls", urls);
         }
         return j;

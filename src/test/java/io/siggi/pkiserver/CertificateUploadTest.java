@@ -293,12 +293,161 @@ class CertificateUploadTest {
     }
 
     @Test
-    void endEntityIsNotASigningCertificate() throws Exception {
+    void endEntityIsPublishedUnderItsIssuer() throws Exception {
         start();
         X509Certificate leaf = new Spec("CN=www.example.com", "CN=Siggi.io", rootKey).endEntity().build();
+        String serial = X509Util.formatSerial(leaf.getSerialNumber());
         Response r = upload(leaf);
+        assertEquals(200, r.status(), r.json().toString());
+        JsonObject result = r.result(0);
+        assertEquals("published", result.get("result").getAsString());
+        assertEquals("root2026", result.get("slug").getAsString());
+        assertEquals(serial, result.get("serial").getAsString());
+        JsonObject urls = result.getAsJsonObject("urls");
+        assertEquals("/root2026/" + serial + "/certificate.pem", urls.get("certificate").getAsString());
+        assertEquals("/root2026/" + serial + "/chain.pem", urls.get("chain").getAsString());
+        assertEquals("/root2026/" + serial + "/fullchain.pem", urls.get("fullchain").getAsString());
+
+        assertEquals(leaf, server.getStore().endEntityCert("root2026", serial).cert());
+        assertArrayEquals(leaf.getEncoded(),
+                Files.readAllBytes(dir.resolve("data/ca/root2026/certs/" + serial + "/certificate.der")));
+        assertNull(server.getStore().signingCert("www.example.com"));
+
+        // identical re-upload (DER or PEM) is a no-op
+        r = upload(X509Util.pem(leaf).getBytes(StandardCharsets.US_ASCII));
+        assertEquals(200, r.status(), r.json().toString());
+        assertEquals("unchanged", r.result(0).get("result").getAsString());
+        assertEquals("root2026", r.result(0).get("slug").getAsString());
+        assertEquals("/root2026/" + serial + "/fullchain.pem",
+                r.result(0).getAsJsonObject("urls").get("fullchain").getAsString());
+    }
+
+    @Test
+    void endEntityWithSameIssuerAndSerialIsConflict() throws Exception {
+        start();
+        X509Certificate leaf = new Spec("CN=a.example.com", "CN=Siggi.io", rootKey).endEntity().build();
+        assertEquals(200, upload(leaf).status());
+        // same serial, different certificate (a CA mistake)
+        X509Certificate dup = withSerial(leaf.getSerialNumber(), "CN=b.example.com", "CN=Siggi.io", rootKey);
+        Response r = upload(dup);
+        assertEquals(409, r.status(), r.json().toString());
+        assertTrue(r.error().contains("already published under \"root2026\""), r.error());
+        assertEquals("rejected", r.result(0).get("result").getAsString());
+        String serial = X509Util.formatSerial(leaf.getSerialNumber());
+        assertEquals(leaf, server.getStore().endEntityCert("root2026", serial).cert());
+    }
+
+    private static X509Certificate withSerial(BigInteger serial, String subject, String issuer, KeyPair issuerKey)
+            throws Exception {
+        JcaX509v3CertificateBuilder b = new JcaX509v3CertificateBuilder(new X500Name(issuer), serial,
+                Date.from(NOW.minus(Duration.ofDays(1))), Date.from(NOW.plus(Duration.ofDays(30))),
+                new X500Name(subject), keyPair().getPublic());
+        b.addExtension(Extension.basicConstraints, true, new BasicConstraints(false));
+        return new JcaX509CertificateConverter().getCertificate(
+                b.build(new JcaContentSignerBuilder("SHA256withECDSA").build(issuerKey.getPrivate())));
+    }
+
+    @Test
+    void endEntityThroughInstalledIntermediate() throws Exception {
+        KeyPair interKey = keyPair();
+        X509Certificate inter = new Spec("CN=TLS 2", "CN=Siggi.io", rootKey).key(interKey).build();
+        store().addSigningCert("tls2", inter);
+        start();
+        X509Certificate leaf = new Spec("CN=www.example.com", "CN=TLS 2", interKey).endEntity().build();
+        String serial = X509Util.formatSerial(leaf.getSerialNumber());
+        // a fullchain-style body: leaf, installed intermediate, installed root
+        Response r = upload(leaf, inter, root);
+        assertEquals(200, r.status(), r.json().toString());
+        assertEquals("published", r.result(0).get("result").getAsString());
+        assertEquals("tls2", r.result(0).get("slug").getAsString());
+        assertEquals("unchanged", r.result(1).get("result").getAsString());
+        assertEquals("unchanged", r.result(2).get("result").getAsString());
+        assertNotNull(server.getStore().endEntityCert("tls2", serial));
+        assertNull(server.getStore().endEntityCert("root2026", serial));
+    }
+
+    @Test
+    void endEntityExtraCertsInBodyAreNotTrusted() throws Exception {
+        start();
+        // an intermediate that isn't (and can't be) installed: signed by an unknown key
+        KeyPair interKey = keyPair();
+        X509Certificate inter = new Spec("CN=Rogue", "CN=Siggi.io", keyPair()).key(interKey).build();
+        X509Certificate leaf = new Spec("CN=www.example.com", "CN=Rogue", interKey).endEntity().build();
+        Response r = upload(leaf, inter);
+        assertEquals(400, r.status(), r.json().toString());
+        assertTrue(r.result(0).get("error").getAsString().contains("CN=Rogue is not installed"), r.json().toString());
+        assertTrue(server.getStore().endEntityCerts("root2026").isEmpty());
+
+        // a self-signed root in the body is no trust anchor either
+        KeyPair fakeKey = keyPair();
+        X509Certificate fakeRoot = new Spec("CN=Fake Root", "CN=Fake Root", fakeKey).key(fakeKey).build();
+        X509Certificate leaf2 = new Spec("CN=www.example.com", "CN=Fake Root", fakeKey).endEntity().build();
+        r = upload(leaf2, fakeRoot);
+        assertEquals(400, r.status(), r.json().toString());
+        assertTrue(r.result(0).get("error").getAsString().contains("CN=Fake Root is not installed"),
+                r.json().toString());
+    }
+
+    @Test
+    void endEntityUploadedWithItsNewIntermediate() throws Exception {
+        start();
+        KeyPair interKey = keyPair();
+        X509Certificate inter = new Spec("CN=Inter", "CN=Siggi.io", rootKey).key(interKey).build();
+        X509Certificate leaf = new Spec("CN=www.example.com", "CN=Inter", interKey).endEntity().build();
+        // the intermediate passes validation itself and is installed, then the leaf chains through it
+        Response r = upload(leaf, inter);
+        assertEquals(200, r.status(), r.json().toString());
+        assertEquals("published", r.result(0).get("result").getAsString());
+        assertEquals("inter", r.result(0).get("slug").getAsString());
+        assertEquals("installed", r.result(1).get("result").getAsString());
+    }
+
+    @Test
+    void revokedEndEntityIsRejected() throws Exception {
+        X509Certificate revoked = new Spec("CN=revoked.example.com", "CN=Siggi.io", rootKey).endEntity().build();
+        store().addCrl("root2026", rootCrl(1, revoked), CrlState.CURRENT, NOW);
+        start();
+        Response r = upload(revoked);
         assertEquals(400, r.status());
-        assertTrue(r.error().contains("not a CA certificate"), r.error());
+        assertTrue(r.error().contains("revoked by CRL #1 of \"root2026\""), r.error());
+        assertTrue(server.getStore().endEntityCerts("root2026").isEmpty());
+    }
+
+    @Test
+    void endEntityUnderRevokedIntermediateIsRejected() throws Exception {
+        KeyPair interKey = keyPair();
+        X509Certificate inter = new Spec("CN=Inter", "CN=Siggi.io", rootKey).key(interKey).build();
+        store().addSigningCert("inter", inter);
+        store().addCrl("root2026", rootCrl(1, inter), CrlState.CURRENT, NOW);
+        start();
+        Response r = upload(new Spec("CN=www.example.com", "CN=Inter", interKey).endEntity().build());
+        assertEquals(400, r.status());
+        assertTrue(r.error().contains("CN=Inter") && r.error().contains("revoked"), r.error());
+    }
+
+    @Test
+    void expiredEndEntityIsRejectedButNotYetValidIsAccepted() throws Exception {
+        start();
+        X509Certificate expired = new Spec("CN=old.example.com", "CN=Siggi.io", rootKey).endEntity()
+                .validity(NOW.minus(Duration.ofDays(60)), NOW.minus(Duration.ofDays(1))).build();
+        Response r = upload(expired);
+        assertEquals(400, r.status());
+        assertTrue(r.error().contains("expired"), r.error());
+
+        X509Certificate future = new Spec("CN=new.example.com", "CN=Siggi.io", rootKey).endEntity()
+                .validity(NOW.plus(Duration.ofDays(10)), NOW.plus(Duration.ofDays(100))).build();
+        r = upload(future);
+        assertEquals(200, r.status(), r.json().toString());
+        assertEquals("published", r.result(0).get("result").getAsString());
+    }
+
+    @Test
+    void forgedEndEntityIsRejected() throws Exception {
+        start();
+        X509Certificate forged = new Spec("CN=www.example.com", "CN=Siggi.io", keyPair()).endEntity().build();
+        Response r = upload(forged);
+        assertEquals(400, r.status());
+        assertTrue(r.error().contains("signature does not verify"), r.error());
     }
 
     @Test
@@ -430,8 +579,17 @@ class CertificateUploadTest {
         assertEquals(200, r.status(), r.json().toString());
         assertEquals("tls3", r.result(0).get("slug").getAsString());
 
-        // an end-entity certificate isn't a signing certificate
-        r = upload(Files.readAllBytes(samples.resolve("Stromno_MITM.crt")));
-        assertEquals(400, r.status());
+        // an end-entity certificate issued by TLS 2 (valid until the end of 2026)
+        X509Certificate stromno = X509Util.parseCertificate(Files.readAllBytes(samples.resolve("Stromno_MITM.crt")));
+        r = upload(stromno.getEncoded());
+        if (stromno.getNotAfter().toInstant().isAfter(Instant.now())) {
+            assertEquals(200, r.status(), r.json().toString());
+            assertEquals("published", r.result(0).get("result").getAsString());
+            assertEquals("tls2", r.result(0).get("slug").getAsString());
+            assertNull(server.getStore().signingCert("stromno.com"));
+        } else {
+            assertEquals(400, r.status());
+            assertTrue(r.error().contains("expired"), r.error());
+        }
     }
 }
