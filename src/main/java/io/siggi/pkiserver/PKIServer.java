@@ -78,6 +78,7 @@ public final class PKIServer {
             api.registerUpload(CrlUpload.PATH, new CrlUpload(store, Clock.systemUTC(),
                     Duration.ofDays(config.limits().crlMaxFutureDays()), crlScheduler::wakeUp));
             api.registerGet(CrlCoverage.API_PREFIX, CrlCoverage.apiHandler(store, Clock.systemUTC(), coverageWarning));
+            api.registerGet(CertificateStatus.API_PREFIX, CertificateStatus.apiHandler(store, Clock.systemUTC()));
 
             executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("PKIServer-http-", 0).factory());
             httpServer = new HTTPServerBuilder()

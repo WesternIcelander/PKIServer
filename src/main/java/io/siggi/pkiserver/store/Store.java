@@ -788,7 +788,7 @@ public final class Store {
             "otherName", "email", "DNS", "x400Address", "dirName", "ediPartyName", "URI", "IP", "RID"};
 
     /** SANs as {@code type:value} strings, e.g. {@code DNS:example.com}. */
-    static List<String> subjectAltNames(X509Certificate cert) {
+    public static List<String> subjectAltNames(X509Certificate cert) {
         Collection<List<?>> names;
         try {
             names = cert.getSubjectAlternativeNames();

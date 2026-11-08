@@ -40,9 +40,21 @@ final class ChainBuilder {
      * unknown or no path of installed certificates leads from it to an installed root
      */
     List<SigningCert> chain(String issuerSlug) {
+        List<SigningCert> path = path(issuerSlug);
+        if (path == null) return null;
+        return List.copyOf(path.subList(0, path.size() - 1)); // drop the root
+    }
+
+    /**
+     * Like {@link #chain} but including the root: the issuing signing certificate followed by
+     * its issuers up to and including the root.
+     *
+     * @return the path, issuer first, never empty; null if the slug is unknown or unchainable
+     */
+    List<SigningCert> path(String issuerSlug) {
         SigningCert issuer = store.signingCert(issuerSlug);
         if (issuer == null) return null;
-        if (issuer.role() == CaRole.ROOT) return List.of();
+        if (issuer.role() == CaRole.ROOT) return List.of(issuer);
         List<List<SigningCert>> paths = new ArrayList<>();
         List<SigningCert> above = new ArrayList<>();
         above.add(issuer);
@@ -50,8 +62,7 @@ final class ChainBuilder {
         if (paths.isEmpty()) return null;
         paths.sort(Comparator.<List<SigningCert>>comparingInt(List::size)
                 .thenComparing(ChainBuilder::slugKey));
-        List<SigningCert> best = paths.get(0);
-        return List.copyOf(best.subList(0, best.size() - 1)); // drop the root
+        return List.copyOf(paths.get(0));
     }
 
     /** {@code chain.pem} for {@code ee}: concatenated PEM, empty string under a root; null if unchainable. */

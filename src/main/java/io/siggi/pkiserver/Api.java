@@ -43,7 +43,7 @@ final class Api {
 
     /**
      * Handles a read-only {@code GET}/{@code HEAD} of {@code <prefix><rest>}, after the gate.
-     * {@code rest} is the (non-empty, slash-free) path after the registered prefix.
+     * {@code rest} is the (non-empty) path after the registered prefix; it may contain slashes.
      */
     @FunctionalInterface
     interface GetHandler {
@@ -145,16 +145,21 @@ final class Api {
     /** Dispatches to a {@link #registerGet read-only endpoint}, if one matches. */
     private boolean handleGet(HTTPRequest request) throws Exception {
         String path = request.url;
-        int slash = path.lastIndexOf('/');
-        if (slash < 0 || slash == path.length() - 1) return false;
-        GetHandler handler = reads.get(path.substring(0, slash + 1));
-        if (handler == null) return false;
+        String prefix = null;
+        for (String candidate : reads.keySet()) {
+            if (path.length() > candidate.length() && path.startsWith(candidate)
+                    && (prefix == null || candidate.length() > prefix.length())) {
+                prefix = candidate;
+            }
+        }
+        if (prefix == null) return false;
+        GetHandler handler = reads.get(prefix);
         if (!request.method.equals("GET") && !request.method.equals("HEAD")) {
             request.response.setHeader("Allow", "GET, HEAD");
             error(request, 405, "Method Not Allowed", "use GET", true);
             return true;
         }
-        handler.handle(request, path.substring(slash + 1));
+        handler.handle(request, path.substring(prefix.length()));
         return true;
     }
 

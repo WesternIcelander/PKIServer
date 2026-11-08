@@ -206,7 +206,7 @@ Served over plain HTTP, for `GET` and `HEAD`:
 |---|---|
 | `/<slug>.der` (alias `/<slug>.crt`) | signing certificate, DER, `application/pkix-cert` |
 | `/<slug>.pem` | signing certificate, PEM, `application/x-pem-file` |
-| `/` (alias `/index.html`) | index page: signing certificates, their CRL status and coverage |
+| `/` (alias `/index.html`) | index page: signing certificates, their CRL status and coverage; published end-entity certificates and their revocation status |
 
 Responses carry an `ETag` (and, for certificates, `Last-Modified`), and conditional
 requests (`If-None-Match`, `If-Modified-Since`) get `304 Not Modified`. Certificates are
@@ -237,6 +237,40 @@ ones, so the next CRL must use at least `nextCrlNumber`. `coverageUntil` is the 
 `nextUpdate` across the current and pending CRLs. `coverageWarning` is set when that is
 less than `limits.coverageWarningDays` away (or already past). The index page shows the
 same information per CA.
+
+## Certificate status
+
+`GET /api/certificate/<slug>/<serial>` (read-only, HTTPS through a trusted proxy like the
+rest of `/api/*`) returns the status of a published end-entity certificate:
+
+```json
+{
+  "issuer": "tls2",
+  "serial": "a3f1",
+  "subject": "CN=www.example.com",
+  "subjectAltNames": ["DNS:www.example.com"],
+  "notBefore": "…", "notAfter": "…", "sha256": "…", "uploadedAt": "…",
+  "now": "2026-11-08T00:00:00Z",
+  "status": "revoked",
+  "revoked": true,
+  "revocation": {
+    "revokedCa": null,
+    "revokedSerial": "a3f1",
+    "revocationDate": "2026-11-07T12:00:00Z",
+    "reason": "keyCompromise",
+    "crlIssuer": "tls2",
+    "crlNumber": "5"
+  },
+  "urls": {"certificate": "/tls2/a3f1/certificate.pem", "chain": "…", "fullchain": "…", "der": "…"}
+}
+```
+
+`status` is `revoked`, `expired`, `not-yet-valid` or `valid` (in that order of
+precedence). A certificate counts as revoked when its issuer's current CRL lists it, or
+when a signing certificate above it is listed in its own issuer's current CRL; then
+`revokedCa` names that CA. `reason` is null when the CRL entry has no reason code.
+Unknown slug or serial: `404`; malformed: `400`. The index page lists the same status for
+every published end-entity certificate.
 
 [`examples/upload-crls.py`](examples/upload-crls.py) is a signer-side helper that uploads a
 batch of pre-signed CRLs and prints this report; see [`examples/README.md`](examples/README.md).

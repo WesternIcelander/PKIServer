@@ -350,7 +350,8 @@ final class PublicFiles {
                 .append("body{font-family:system-ui,sans-serif;margin:2em;color:#222}")
                 .append("table{border-collapse:collapse}th,td{border:1px solid #ccc;padding:.4em .6em;")
                 .append("text-align:left;vertical-align:top}th{background:#f4f4f4}")
-                .append(".warn{color:#a40000;font-weight:bold}.muted{color:#777}code{font-size:.9em}\n")
+                .append(".warn{color:#a40000;font-weight:bold}.muted{color:#777}code{font-size:.9em}")
+                .append("tr.revoked td{background:#fbeaea}h1{margin-top:1.5em}\n")
                 .append("</style>\n</head>\n<body>\n<h1>Signing certificates</h1>\n");
         if (certs.isEmpty()) {
             sb.append("<p class=\"muted\">No signing certificates are installed.</p>\n");
@@ -363,6 +364,7 @@ final class PublicFiles {
             }
             sb.append("</table>\n");
         }
+        appendEndEntities(sb, certs, now);
         sb.append("<p class=\"muted\">Generated ").append(DISPLAY_DATE.format(now)).append("</p>\n")
                 .append("</body>\n</html>\n");
         return sb.toString();
@@ -439,6 +441,65 @@ final class PublicFiles {
             }
         }
         sb.append("</td></tr>\n");
+    }
+
+    /** The published end-entity certificates, with their revocation status. */
+    private void appendEndEntities(StringBuilder sb, List<SigningCert> signingCerts, Instant now) {
+        sb.append("<h1>End-entity certificates</h1>\n");
+        boolean any = false;
+        for (SigningCert issuer : signingCerts) {
+            for (EndEntityCert ee : store.endEntityCerts(issuer.slug())) {
+                if (!any) {
+                    sb.append("<table>\n<tr><th>Issuer</th><th>Serial</th><th>Subject</th><th>Validity</th>")
+                            .append("<th>Status</th><th>Download</th></tr>\n");
+                    any = true;
+                }
+                appendEndEntityRow(sb, ee, CertificateStatus.of(store, chains, ee, now));
+            }
+        }
+        if (any) {
+            sb.append("</table>\n");
+        } else {
+            sb.append("<p class=\"muted\">No end-entity certificates are published.</p>\n");
+        }
+    }
+
+    private static void appendEndEntityRow(StringBuilder sb, EndEntityCert ee, CertificateStatus status) {
+        X509Certificate cert = ee.cert();
+        sb.append("<tr id=\"").append(esc(ee.issuerSlug() + "/" + ee.serial())).append("\"");
+        if (status.status() == CertificateStatus.Status.REVOKED) sb.append(" class=\"revoked\"");
+        sb.append(">");
+        sb.append("<td><a href=\"#").append(esc(ee.issuerSlug())).append("\"><code>").append(esc(ee.issuerSlug()))
+                .append("</code></a></td>");
+        sb.append("<td><code>").append(esc(ee.serial())).append("</code></td>");
+        sb.append("<td>").append(esc(cert.getSubjectX500Principal().getName())).append("</td>");
+        sb.append("<td>").append(DISPLAY_DATE.format(cert.getNotBefore().toInstant())).append(" &ndash;<br>")
+                .append(DISPLAY_DATE.format(cert.getNotAfter().toInstant())).append("</td>");
+        sb.append("<td>");
+        switch (status.status()) {
+            case REVOKED -> {
+                CertificateStatus.Revocation r = status.revocation();
+                sb.append("<span class=\"warn\">revoked</span>");
+                if (r.revokedSlug() != null) {
+                    sb.append(" (issuing CA <code>").append(esc(r.revokedSlug())).append("</code> is revoked)");
+                }
+                sb.append("<br>since ").append(DISPLAY_DATE.format(r.revocationDate()));
+                String reason = CertificateStatus.reasonName(r.reason());
+                if (reason != null) sb.append("<br>reason: ").append(esc(reason));
+                sb.append("<br><span class=\"muted\">CRL #").append(r.crlNumber()).append(" of <code>")
+                        .append(esc(r.crlSlug())).append("</code></span>");
+            }
+            case EXPIRED -> sb.append("<span class=\"muted\">expired</span>");
+            case NOT_YET_VALID -> sb.append("<span class=\"muted\">not yet valid</span>");
+            case VALID -> sb.append("valid");
+        }
+        sb.append("</td>");
+        String base = esc(urlPart(ee.issuerSlug()) + "/" + ee.serial() + "/");
+        sb.append("<td><a href=\"").append(base).append("certificate.pem\">certificate</a> &middot; <a href=\"")
+                .append(base).append("chain.pem\">chain</a> &middot; <a href=\"")
+                .append(base).append("fullchain.pem\">fullchain</a> &middot; <a href=\"")
+                .append(base).append("certificate.der\">DER</a></td>");
+        sb.append("</tr>\n");
     }
 
     /** The issuer's slug if it's on the server, otherwise its DN. */

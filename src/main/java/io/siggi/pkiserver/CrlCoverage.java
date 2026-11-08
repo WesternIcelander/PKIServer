@@ -114,6 +114,10 @@ record CrlCoverage(String slug, Instant now, StoredCrl current, List<StoredCrl> 
     /** {@code GET /api/crl/<slug>}: the coverage report as JSON. */
     static Api.GetHandler apiHandler(Store store, Clock clock, Duration warnThreshold) {
         return (request, rest) -> {
+            if (rest.indexOf('/') >= 0) {
+                Api.error(request, 404, "Not Found", "no such API endpoint", false);
+                return;
+            }
             String problem = RequestPaths.slugProblem(rest);
             if (problem != null) {
                 Api.error(request, 400, "Bad Request", problem, false);
