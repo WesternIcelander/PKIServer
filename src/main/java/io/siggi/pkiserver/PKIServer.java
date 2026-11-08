@@ -34,6 +34,7 @@ public final class PKIServer {
     private ServerSocket serverSocket;
     private HTTPServer httpServer;
     private Store store;
+    private volatile PublicFiles publicFiles;
     private ExecutorService executor;
     private Thread acceptThread;
     private volatile boolean stopping;
@@ -54,6 +55,7 @@ public final class PKIServer {
             started = true;
             Files.createDirectories(config.dataDir());
             store = Store.open(config.dataDir());
+            publicFiles = new PublicFiles(store);
 
             executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("PKIServer-http-", 0).factory());
             httpServer = new HTTPServerBuilder()
@@ -148,6 +150,7 @@ public final class PKIServer {
     }
 
     private void handleRequest(HTTPRequest request) throws Exception {
+        if (publicFiles.handle(request)) return;
         request.response.setHeader("404 Not Found");
         request.response.setContentType("text/plain; charset=utf-8");
         request.response.write("Not found\n");

@@ -134,6 +134,24 @@ public final class Store {
         return data == null ? null : data.cert;
     }
 
+    /**
+     * When the signing certificate {@code slug} was stored (the modification time of its
+     * {@code cert.der}), or null if the slug is unknown or the time can't be read.
+     */
+    public Instant signingCertModified(String slug) {
+        Path file;
+        synchronized (this) {
+            CaData data = cas.get(slug);
+            if (data == null) return null;
+            file = data.dir(caDir).resolve(CERT_FILE);
+        }
+        try {
+            return Files.getLastModifiedTime(file).toInstant();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
     /** The signing certificate with this subject DN and public key, or null. */
     public synchronized SigningCert signingCert(X500Principal subject, PublicKey key) {
         return bySubjectAndKey.get(new SubjectKey(subject, X509Util.spkiSha256Hex(key)));

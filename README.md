@@ -106,3 +106,17 @@ data/
 
 A certificate's role is derived from the certificate itself: it is a root if it is
 self-signed and its signature verifies with its own key, otherwise an intermediate.
+
+## Public files
+
+Served over plain HTTP, for `GET` and `HEAD`:
+
+| URL | Content |
+|---|---|
+| `/<slug>.der` (alias `/<slug>.crt`) | signing certificate, DER, `application/pkix-cert` |
+| `/<slug>.pem` | signing certificate, PEM, `application/x-pem-file` |
+| `/` (alias `/index.html`) | index page: signing certificates, their CRL status and coverage |
+
+Responses carry an `ETag` (and, for certificates, `Last-Modified`), and conditional
+requests (`If-None-Match`, `If-Modified-Since`) get `304 Not Modified`. Certificates are
+cacheable for an hour; the index page is `no-cache`.
