@@ -19,7 +19,8 @@ COPY target/PKIServer-1.0-SNAPSHOT.jar /app/PKIServer.jar
 COPY deploy/config.example.json /etc/pkiserver/config.json
 
 USER pkiserver
-# SiggiHTTP caches Cloudflare's address ranges in the working directory, so it must be writable.
+# SiggiHTTP refreshes Cloudflare's address ranges in cloudflare-ips.txt in the working directory
+# only if that file already exists, and silently skips it if the file can't be written.
 WORKDIR /data
 VOLUME /data
 EXPOSE 8080

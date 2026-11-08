@@ -44,7 +44,9 @@ Inside the container:
 - the config is `/etc/pkiserver/config.json` (the example config is baked in as a default;
   mount your own over it, read-only);
 - the data directory is the volume `/data` (`"dataDir": "/data"`); it is also the working
-  directory, where SiggiHTTP caches Cloudflare's address list (`cloudflare-ips.txt`);
+  directory. SiggiHTTP refreshes Cloudflare's address list in `cloudflare-ips.txt` there only
+  if that file already exists, and silently skips it if the file can't be written (SiggiHTTP
+  1.10 also creates the file when it's missing, a bug fixed in 1.11);
 - the server listens on port 8080 and runs as the unprivileged user `pkiserver`
   (uid 10001), which must be able to write `/data`.
 
