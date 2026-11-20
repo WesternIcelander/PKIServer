@@ -49,9 +49,8 @@ public final class PKIServer {
     private final Set<Socket> connections = ConcurrentHashMap.newKeySet();
     /**
      * The address the connection being handled on this thread really comes from. SiggiHTTP only
-     * exposes the client address after applying X-Forwarded-For (and it honours that header from
-     * loopback and CloudFlare addresses regardless of our config), so the HTTPS gate can't rely
-     * on it. Set by the accept loop and carried into SiggiHTTP's tasks by {@link #peerTracking}.
+     * exposes the client address after applying X-Forwarded-For, so the HTTPS gate can't rely on
+     * it. Set by the accept loop and carried into SiggiHTTP's tasks by {@link #peerTracking}.
      */
     private static final ThreadLocal<InetAddress> PEER = new ThreadLocal<>();
 

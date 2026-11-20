@@ -45,8 +45,7 @@ Inside the container:
   mount your own over it, read-only);
 - the data directory is the volume `/data` (`"dataDir": "/data"`); it is also the working
   directory. SiggiHTTP refreshes Cloudflare's address list in `cloudflare-ips.txt` there only
-  if that file already exists, and silently skips it if the file can't be written (SiggiHTTP
-  1.10 also creates the file when it's missing, a bug fixed in 1.11);
+  if that file already exists, and silently skips it if the file can't be written;
 - the server listens on port 8080 and runs as the unprivileged user `pkiserver`
   (uid 10001), which must be able to write `/data`.
 
@@ -125,7 +124,6 @@ and make sure nothing else can connect from those addresses:
 
 If the host name is proxied through Cloudflare, Cloudflare must not "Always Use HTTPS" for
 it (that redirects port 80), and the origin proxy must still connect to PKIServer itself:
-Cloudflare's addresses are not trusted proxies. SiggiHTTP does accept `X-Forwarded-For`
-from Cloudflare's address ranges for the client address (rate limiting), but never treats
-them as the HTTPS proxy. With "Flexible" SSL Cloudflare talks to the origin over plain HTTP,
+Cloudflare's addresses are not trusted proxies, neither as the HTTPS proxy nor for
+`X-Forwarded-For`, so rate limits count each Cloudflare address as one client. With "Flexible" SSL Cloudflare talks to the origin over plain HTTP,
 so the origin sees `http` and uploads are refused; use "Full (strict)".

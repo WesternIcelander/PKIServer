@@ -175,11 +175,10 @@ class ApiGateTest {
             assertEquals(403, r.status(), contentType);
         }
         // SiggiHTTP would read form bodies itself before calling us. With the post limit at 1
-        // byte it refuses them up front instead and closes the connection (its 413 page is lost
-        // because it doesn't flush before closing).
-        IOException e = assertThrows(IOException.class, () -> send("POST /api/test HTTP/1.1\nHost: pki.test\n"
-                + VIA_PROXY + "Content-Type: application/x-www-form-urlencoded\nContent-Length: 500000\n", null));
-        assertTrue(e.getMessage().contains("connection closed"), e.getMessage());
+        // byte it refuses them up front with its own 413 instead, and closes the connection.
+        Response form = send("POST /api/test HTTP/1.1\nHost: pki.test\n"
+                + VIA_PROXY + "Content-Type: application/x-www-form-urlencoded\nContent-Length: 500000\n", null);
+        assertEquals(413, form.status());
         assertEquals(0, uploads.get());
     }
 
@@ -265,12 +264,16 @@ class ApiGateTest {
     void malformedPathsAre400Json() throws Exception {
         start("[\"127.0.0.1\"]", null);
         for (String path : new String[]{"/%2e%2e/data/config.json", "/tls2/%2e%2e/%2e%2e/config.json",
-                "/api/crl/%2e%2e", "/api/crl/..%2fx", "/a\\b.der", "/tls2.der%00", "/%C3%A9.der", "/tls2//x",
+                "/api/crl/%2e%2e", "/a\\b.der", "/tls2.der%00", "/%C3%A9.der", "/tls2//x",
                 "/tls2/", "/./tls2.der", "/api/../tls2.der", "/x:y", "/" + "a".repeat(600)}) {
             Response r = get(path, VIA_PROXY);
             assertEquals(400, r.status(), path);
             assertTrue(r.headers().get("content-type").startsWith("application/json"), path);
             assertFalse(r.error().isEmpty(), path);
+        }
+        // SiggiHTTP refuses encoded slashes with its own (non-JSON) 400 before calling us.
+        for (String path : new String[]{"/api/crl/..%2fx", "/tls2%2f.der", "/api/crl/tls2%2F"}) {
+            assertEquals(400, get(path, VIA_PROXY).status(), path);
         }
         // Malformed API paths are still behind the HTTPS gate.
         assertEquals(403, get("/api/crl/%2e%2e", "").status());
