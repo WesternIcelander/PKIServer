@@ -91,6 +91,8 @@ class CertificateStatusTest {
                 CrlState.CURRENT, NOW);
         store.addCrl("siggi.io", crl("CN=Siggi.io", rootKey, 7, BigInteger.valueOf(3), -1),
                 CrlState.CURRENT, NOW);
+        PublicFilesTest.listEndEntities(dir.resolve("data"), "tls2");
+        PublicFilesTest.listEndEntities(dir.resolve("data"), "tls3");
         server = new PKIServer(Config.parse("{\"listen\": \"127.0.0.1:0\", \"dataDir\": \"data\", "
                 + "\"trustedProxies\": [\"127.0.0.1\"]}", dir));
         server.start();
@@ -207,8 +209,8 @@ class CertificateStatusTest {
     }
 
     @Test
-    void indexShowsRevokedCertificates() throws Exception {
-        String html = get("/", false).body();
+    void authorityPageShowsRevokedCertificates() throws Exception {
+        String html = get("/tls2", false).body();
         assertTrue(html.contains("End-entity certificates"), html);
         assertTrue(html.contains("<tr id=\"tls2/a1\">"), html);
         int good = html.indexOf("<tr id=\"tls2/a1\">");
@@ -221,12 +223,13 @@ class CertificateStatusTest {
         assertTrue(row.contains("reason: keyCompromise"), row);
         assertTrue(row.contains("CRL #5"), row);
 
+        int old = html.indexOf("<tr id=\"tls2/c3\">");
+        assertTrue(html.substring(old, html.indexOf("</tr>", old)).contains(">expired<"), html);
+
+        html = get("/tls3", false).body();
         int orphan = html.indexOf("<tr id=\"tls3/d4\" class=\"revoked\">");
         assertTrue(orphan >= 0, html);
         assertTrue(html.substring(orphan, html.indexOf("</tr>", orphan))
-                .contains("issuing CA <code>tls3</code> is revoked"), html);
-
-        int old = html.indexOf("<tr id=\"tls2/c3\">");
-        assertTrue(html.substring(old, html.indexOf("</tr>", old)).contains(">expired<"), html);
+                .contains("issuing CA <a href=\"/tls3\"><code>tls3</code></a> is revoked"), html);
     }
 }

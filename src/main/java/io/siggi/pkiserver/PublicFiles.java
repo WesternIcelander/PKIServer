@@ -27,8 +27,10 @@ import java.util.Locale;
  * Serves the public, read-only files: signing certificates at {@code /<slug>.der}
  * (alias {@code .crt}) and {@code /<slug>.pem}, their current CRLs at {@code /<slug>.crl} and
  * {@code /<slug>.crl.pem}, end-entity certificates at
- * {@code /<slug>/<serial>/{certificate,chain,fullchain}.pem} and {@code certificate.der}, and the
- * index page at {@code /}.
+ * {@code /<slug>/<serial>/{certificate,chain,fullchain}.pem} and {@code certificate.der}, the
+ * index page at {@code /} (the root certificates), and a page for each signing certificate at
+ * {@code /<slug>} (that certificate, the signing certificates it issued and, if its
+ * {@code meta.json} enables it, the end-entity certificates published under it).
  * <p>
  * A current CRL that is past its {@code nextUpdate} is still served (better than a 404), with
  * {@code max-age=0}; the index page flags it as stale and the {@link CrlScheduler} logs it.
@@ -94,6 +96,14 @@ final class PublicFiles {
                 serveCert(request, cert, format);
             }
             return true;
+        }
+        if (Store.isStorableSlug(name)) {
+            SigningCert cert = store.signingCert(name);
+            if (cert != null) {
+                if (!allowGet(request)) return true;
+                servePage(request, authorityHtml(cert, Instant.now()));
+                return true;
+            }
         }
         return false;
     }
@@ -270,7 +280,11 @@ final class PublicFiles {
     }
 
     private void serveIndex(HTTPRequest request) throws Exception {
-        byte[] body = indexHtml(Instant.now()).getBytes(StandardCharsets.UTF_8);
+        servePage(request, indexHtml(Instant.now()));
+    }
+
+    private static void servePage(HTTPRequest request, String html) throws Exception {
+        byte[] body = html.getBytes(StandardCharsets.UTF_8);
         String etag = "\"" + X509Util.sha256Hex(body) + "\"";
         request.response.setHeader("Cache-Control", "no-cache");
         send(request, HTML, body, etag, null);
@@ -339,52 +353,116 @@ final class PublicFiles {
         return false;
     }
 
-    // ------------------------------------------------------------------ index page
+    // ------------------------------------------------------------------ index and CA pages
 
+    /** The index page: the root certificates. */
     String indexHtml(Instant now) {
-        List<SigningCert> certs = store.signingCerts();
+        List<SigningCert> roots = new ArrayList<>();
+        for (SigningCert cert : store.signingCerts()) {
+            if (cert.role() == CaRole.ROOT) roots.add(cert);
+        }
         StringBuilder sb = new StringBuilder();
+        appendHead(sb, "PKI");
+        sb.append("<h1>Root certificates</h1>\n");
+        if (roots.isEmpty()) {
+            sb.append("<p class=\"muted\">No root certificates are installed.</p>\n");
+        } else {
+            appendCaTable(sb, roots, now);
+        }
+        appendFoot(sb, now);
+        return sb.toString();
+    }
+
+    /**
+     * The page of one signing certificate: the path down to it from its root, the certificate
+     * itself, and the signing and end-entity certificates under it (each section only if
+     * there are any). End-entity certificates are listed only if
+     * {@link Store#listsEndEntityCerts} says so.
+     */
+    String authorityHtml(SigningCert cert, Instant now) {
+        String slug = cert.slug();
+        StringBuilder sb = new StringBuilder();
+        appendHead(sb, slug + " \u2013 PKI");
+        sb.append("<nav><a href=\"/\">PKI</a>");
+        List<SigningCert> path = chains.path(slug);
+        if (path != null) {
+            for (int i = path.size() - 1; i > 0; i--) {
+                String above = path.get(i).slug();
+                sb.append(" &rsaquo; <a href=\"").append(esc(urlPart(above))).append("\"><code>")
+                        .append(esc(above)).append("</code></a>");
+            }
+        }
+        sb.append(" &rsaquo; <code>").append(esc(slug)).append("</code></nav>\n");
+        sb.append("<h1><code>").append(esc(slug)).append("</code></h1>\n");
+        appendCaTable(sb, List.of(cert), now);
+
+        List<SigningCert> issued = new ArrayList<>();
+        for (SigningCert candidate : store.signingCerts()) {
+            if (candidate.role() == CaRole.ROOT) continue;
+            List<SigningCert> candidatePath = chains.path(candidate.slug());
+            if (candidatePath != null && candidatePath.size() > 1 && candidatePath.get(1).slug().equals(slug)) {
+                issued.add(candidate);
+            }
+        }
+        if (!issued.isEmpty()) {
+            sb.append("<h2>Signing certificates</h2>\n");
+            appendCaTable(sb, issued, now);
+        }
+
+        // Hidden unless the CA's meta.json says otherwise: they are served to whoever knows the URL.
+        List<EndEntityCert> endEntities = store.listsEndEntityCerts(slug) ? store.endEntityCerts(slug) : List.of();
+        if (!endEntities.isEmpty()) {
+            sb.append("<h2>End-entity certificates</h2>\n")
+                    .append("<table>\n<tr><th>Serial</th><th>Subject</th><th>Validity</th>")
+                    .append("<th>Status</th><th>Download</th></tr>\n");
+            for (EndEntityCert ee : endEntities) {
+                appendEndEntityRow(sb, ee, CertificateStatus.of(store, chains, ee, now));
+            }
+            sb.append("</table>\n");
+        }
+        appendFoot(sb, now);
+        return sb.toString();
+    }
+
+    private static void appendHead(StringBuilder sb, String title) {
         sb.append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n")
                 .append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n")
-                .append("<title>PKI</title>\n<style>\n")
+                .append("<title>").append(esc(title)).append("</title>\n<style>\n")
                 .append("body{font-family:system-ui,sans-serif;margin:2em;color:#222}")
                 .append("table{border-collapse:collapse}th,td{border:1px solid #ccc;padding:.4em .6em;")
                 .append("text-align:left;vertical-align:top}th{background:#f4f4f4}")
                 .append(".warn{color:#a40000;font-weight:bold}.muted{color:#777}code{font-size:.9em}")
-                .append("tr.revoked td{background:#fbeaea}h1{margin-top:1.5em}\n")
-                .append("</style>\n</head>\n<body>\n<h1>Signing certificates</h1>\n");
-        if (certs.isEmpty()) {
-            sb.append("<p class=\"muted\">No signing certificates are installed.</p>\n");
-        } else {
-            sb.append("<table>\n<tr><th>Name</th><th>Subject</th><th>Role</th><th>Issuer</th><th>Validity</th>")
-                    .append("<th>Download</th><th>Current CRL</th><th>Pending CRLs</th>")
-                    .append("<th>Highest CRL number</th><th>CRL coverage until</th></tr>\n");
-            for (SigningCert cert : certs) {
-                appendRow(sb, cert, now);
-            }
-            sb.append("</table>\n");
-        }
-        appendEndEntities(sb, certs, now);
+                .append("tr.revoked td{background:#fbeaea}h2{margin-top:1.5em}\n")
+                .append("</style>\n</head>\n<body>\n");
+    }
+
+    private static void appendFoot(StringBuilder sb, Instant now) {
         sb.append("<p class=\"muted\">Generated ").append(DISPLAY_DATE.format(now)).append("</p>\n")
                 .append("</body>\n</html>\n");
-        return sb.toString();
+    }
+
+    private void appendCaTable(StringBuilder sb, List<SigningCert> certs, Instant now) {
+        sb.append("<table>\n<tr><th>Name</th><th>Subject</th><th>Validity</th><th>Download</th>")
+                .append("<th>Current CRL</th><th>CRL coverage until</th></tr>\n");
+        for (SigningCert cert : certs) {
+            appendRow(sb, cert, now);
+        }
+        sb.append("</table>\n");
     }
 
     private void appendRow(StringBuilder sb, SigningCert cert, Instant now) {
         String slug = cert.slug();
         Instant notBefore = cert.cert().getNotBefore().toInstant();
         Instant notAfter = cert.cert().getNotAfter().toInstant();
+        String href = esc(urlPart(slug));
         sb.append("<tr id=\"").append(esc(slug)).append("\">");
-        sb.append("<td><code>").append(esc(slug)).append("</code></td>");
+        sb.append("<td><a href=\"").append(href).append("\"><code>").append(esc(slug)).append("</code></a></td>");
         sb.append("<td>").append(esc(cert.subject().getName())).append("</td>");
-        sb.append("<td>").append(cert.role().id()).append("</td>");
-        sb.append("<td>").append(esc(issuerName(cert))).append("</td>");
         sb.append("<td>").append(DISPLAY_DATE.format(notBefore)).append(" &ndash;<br>")
                 .append(DISPLAY_DATE.format(notAfter));
         if (now.isBefore(notBefore)) sb.append("<br><span class=\"muted\">not yet valid</span>");
         if (now.isAfter(notAfter)) sb.append("<br><span class=\"warn\">expired</span>");
         sb.append("</td>");
-        String href = esc(urlPart(slug));
         sb.append("<td><a href=\"").append(href).append(".der\">DER</a> &middot; <a href=\"")
                 .append(href).append(".pem\">PEM</a></td>");
 
@@ -400,26 +478,6 @@ final class PublicFiles {
             if (coverage.stale()) {
                 sb.append(" <span class=\"warn\">stale</span>");
             }
-        }
-        sb.append("</td><td>");
-        if (coverage.pending().isEmpty()) {
-            sb.append("<span class=\"muted\">none</span>");
-        } else {
-            boolean first = true;
-            for (StoredCrl crl : coverage.pending()) {
-                if (!first) sb.append("<br>");
-                first = false;
-                sb.append("#").append(crl.number()).append(": ").append(DISPLAY_DATE.format(crl.thisUpdate()))
-                        .append(" &ndash; ")
-                        .append(crl.nextUpdate() == null ? "none" : DISPLAY_DATE.format(crl.nextUpdate()));
-            }
-        }
-        sb.append("</td><td>");
-        if (coverage.highestNumber() == null) {
-            sb.append("<span class=\"muted\">none</span>");
-        } else {
-            sb.append("#").append(coverage.highestNumber())
-                    .append("<br><span class=\"muted\">next: #").append(coverage.nextNumber()).append("</span>");
         }
         sb.append("</td><td>");
         if (coverage.coverageUntil() == null) {
@@ -443,34 +501,11 @@ final class PublicFiles {
         sb.append("</td></tr>\n");
     }
 
-    /** The published end-entity certificates, with their revocation status. */
-    private void appendEndEntities(StringBuilder sb, List<SigningCert> signingCerts, Instant now) {
-        sb.append("<h1>End-entity certificates</h1>\n");
-        boolean any = false;
-        for (SigningCert issuer : signingCerts) {
-            for (EndEntityCert ee : store.endEntityCerts(issuer.slug())) {
-                if (!any) {
-                    sb.append("<table>\n<tr><th>Issuer</th><th>Serial</th><th>Subject</th><th>Validity</th>")
-                            .append("<th>Status</th><th>Download</th></tr>\n");
-                    any = true;
-                }
-                appendEndEntityRow(sb, ee, CertificateStatus.of(store, chains, ee, now));
-            }
-        }
-        if (any) {
-            sb.append("</table>\n");
-        } else {
-            sb.append("<p class=\"muted\">No end-entity certificates are published.</p>\n");
-        }
-    }
-
     private static void appendEndEntityRow(StringBuilder sb, EndEntityCert ee, CertificateStatus status) {
         X509Certificate cert = ee.cert();
         sb.append("<tr id=\"").append(esc(ee.issuerSlug() + "/" + ee.serial())).append("\"");
         if (status.status() == CertificateStatus.Status.REVOKED) sb.append(" class=\"revoked\"");
         sb.append(">");
-        sb.append("<td><a href=\"#").append(esc(ee.issuerSlug())).append("\"><code>").append(esc(ee.issuerSlug()))
-                .append("</code></a></td>");
         sb.append("<td><code>").append(esc(ee.serial())).append("</code></td>");
         sb.append("<td>").append(esc(cert.getSubjectX500Principal().getName())).append("</td>");
         sb.append("<td>").append(DISPLAY_DATE.format(cert.getNotBefore().toInstant())).append(" &ndash;<br>")
@@ -481,13 +516,15 @@ final class PublicFiles {
                 CertificateStatus.Revocation r = status.revocation();
                 sb.append("<span class=\"warn\">revoked</span>");
                 if (r.revokedSlug() != null) {
-                    sb.append(" (issuing CA <code>").append(esc(r.revokedSlug())).append("</code> is revoked)");
+                    sb.append(" (issuing CA <a href=\"").append(esc(urlPart(r.revokedSlug()))).append("\"><code>")
+                            .append(esc(r.revokedSlug())).append("</code></a> is revoked)");
                 }
                 sb.append("<br>since ").append(DISPLAY_DATE.format(r.revocationDate()));
                 String reason = CertificateStatus.reasonName(r.reason());
                 if (reason != null) sb.append("<br>reason: ").append(esc(reason));
-                sb.append("<br><span class=\"muted\">CRL #").append(r.crlNumber()).append(" of <code>")
-                        .append(esc(r.crlSlug())).append("</code></span>");
+                sb.append("<br><span class=\"muted\">CRL #").append(r.crlNumber()).append(" of <a href=\"")
+                        .append(esc(urlPart(r.crlSlug()))).append("\"><code>").append(esc(r.crlSlug()))
+                        .append("</code></a></span>");
             }
             case EXPIRED -> sb.append("<span class=\"muted\">expired</span>");
             case NOT_YET_VALID -> sb.append("<span class=\"muted\">not yet valid</span>");
@@ -500,19 +537,6 @@ final class PublicFiles {
                 .append(base).append("fullchain.pem\">fullchain</a> &middot; <a href=\"")
                 .append(base).append("certificate.der\">DER</a></td>");
         sb.append("</tr>\n");
-    }
-
-    /** The issuer's slug if it's on the server, otherwise its DN. */
-    private String issuerName(SigningCert cert) {
-        if (cert.role() == CaRole.ROOT) return "(self-signed)";
-        for (SigningCert candidate : store.signingCertsBySubject(cert.cert().getIssuerX500Principal())) {
-            try {
-                cert.cert().verify(candidate.cert().getPublicKey());
-                return candidate.slug();
-            } catch (Exception ignored) {
-            }
-        }
-        return cert.cert().getIssuerX500Principal().getName();
     }
 
     /** Slugs contain only unreserved characters, but be safe in case of hand-made directories. */

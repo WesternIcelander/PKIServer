@@ -45,7 +45,8 @@ import java.util.regex.Pattern;
  * <pre>
  * &lt;dataDir&gt;/ca/&lt;slug&gt;/
  *   cert.der                     the signing certificate (DER; PEM is accepted and rewritten)
- *   meta.json                    role (root/intermediate), subject, SPKI hash (derived)
+ *   meta.json                    role (root/intermediate), subject, SPKI hash (derived);
+ *                                listEndEntityCertificates (setting, edited by hand)
  *   crl/
  *     &lt;crlNumber&gt;.crl            accepted CRLs, CRL Number in decimal
  *     &lt;crlNumber&gt;.json           state, thisUpdate, nextUpdate, receivedAt
@@ -57,7 +58,10 @@ import java.util.regex.Pattern;
  * <p>
  * DER files are the source of truth. Metadata JSON is derived from them and rewritten at
  * load time when missing or out of date; only the facts that can't be derived
- * ({@code receivedAt}, {@code uploadedAt}, CRL state) are taken from it. Every write goes to
+ * ({@code receivedAt}, {@code uploadedAt}, CRL state) are taken from it, along with the one
+ * setting: a signing certificate's {@code listEndEntityCertificates} (default {@code false}),
+ * whether its page lists the end-entity certificates published under it. It is read at load
+ * time, so changing it takes a restart. Every write goes to
  * a temporary file in the same directory followed by an atomic rename, and the DER file is
  * always written last so its presence means the entry is complete.
  * <p>
@@ -71,6 +75,8 @@ public final class Store {
     public static final String CA_DIR = "ca";
     public static final String CERT_FILE = "cert.der";
     public static final String META_FILE = "meta.json";
+    /** Key in a signing certificate's {@code meta.json}: list its end-entity certificates. */
+    public static final String LIST_END_ENTITIES = "listEndEntityCertificates";
     public static final String CRL_DIR = "crl";
     public static final String DISCARDED_FILE = "discarded.json";
     public static final String CERTS_DIR = "certs";
@@ -100,6 +106,8 @@ public final class Store {
         final List<BigInteger> withheldCrls = new ArrayList<>();
         /** Serials of stored end-entity certificates withheld by {@link #withholdEndEntityCert}. */
         final List<String> withheldEndEntities = new ArrayList<>();
+        /** {@link #LIST_END_ENTITIES} from {@code meta.json}. */
+        boolean listEndEntities;
 
         CaData(SigningCert cert) {
             this.cert = cert;
@@ -212,6 +220,15 @@ public final class Store {
     }
 
     /** End-entity certificates issued by {@code slug}, sorted by serial. */
+    /**
+     * Whether the page of signing certificate {@code slug} lists its end-entity certificates
+     * ({@link #LIST_END_ENTITIES} in its {@code meta.json}; false if unset or unknown slug).
+     */
+    public synchronized boolean listsEndEntityCerts(String slug) {
+        CaData data = cas.get(slug);
+        return data != null && data.listEndEntities;
+    }
+
     public synchronized List<EndEntityCert> endEntityCerts(String slug) {
         CaData data = cas.get(slug);
         return data == null ? List.of() : List.copyOf(data.endEntities.values());
@@ -257,7 +274,7 @@ public final class Store {
             throw new StoreException("ca/" + slug + "/" + CERT_FILE + " exists on disk but isn't loaded");
         }
         Files.createDirectories(dir);
-        writeJson(dir.resolve(META_FILE), caMeta(sc));
+        writeJson(dir.resolve(META_FILE), caMeta(sc, false));
         writeAtomic(dir.resolve(CERT_FILE), sc.der());
         index(new CaData(sc));
         log.info("Stored " + sc.role().id() + " " + sc.subject().getName() + " as \"" + slug + "\"");
@@ -530,8 +547,20 @@ public final class Store {
             log.info("ca/" + slug + "/" + CERT_FILE + " was PEM, rewriting it as DER");
             writeAtomic(certFile, sc.der());
         }
-        updateJson(dir.resolve(META_FILE), caMeta(sc));
+        boolean listEndEntities = false;
+        JsonObject meta = readJsonQuietly(dir.resolve(META_FILE));
+        if (meta != null && meta.has(LIST_END_ENTITIES)) {
+            JsonElement flag = meta.get(LIST_END_ENTITIES);
+            if (flag.isJsonPrimitive() && flag.getAsJsonPrimitive().isBoolean()) {
+                listEndEntities = flag.getAsBoolean();
+            } else {
+                log.warning("ca/" + slug + "/" + META_FILE + ": " + LIST_END_ENTITIES
+                        + " must be true or false, using false");
+            }
+        }
+        updateJson(dir.resolve(META_FILE), caMeta(sc, listEndEntities));
         CaData data = new CaData(sc);
+        data.listEndEntities = listEndEntities;
         loadCrls(data, dir.resolve(CRL_DIR));
         loadEndEntities(data, dir.resolve(CERTS_DIR));
         index(data);
@@ -748,7 +777,7 @@ public final class Store {
 
     // ------------------------------------------------------------------ metadata JSON
 
-    private static JsonObject caMeta(SigningCert sc) {
+    private static JsonObject caMeta(SigningCert sc, boolean listEndEntities) {
         JsonObject o = new JsonObject();
         o.addProperty("role", sc.role().id());
         o.addProperty("subject", sc.subject().getName());
@@ -758,6 +787,7 @@ public final class Store {
         o.addProperty("sha256", sc.sha256());
         o.addProperty("notBefore", sc.cert().getNotBefore().toInstant().toString());
         o.addProperty("notAfter", sc.cert().getNotAfter().toInstant().toString());
+        o.addProperty(LIST_END_ENTITIES, listEndEntities);
         return o;
     }
 

@@ -104,6 +104,35 @@ class StoreTest {
     }
 
     @Test
+    void listEndEntityCertificatesSetting(@TempDir Path dir) throws Exception {
+        Store store = populated(dir);
+        Path meta = dir.resolve("ca/tls2/meta.json");
+        assertFalse(json(meta).get(Store.LIST_END_ENTITIES).getAsBoolean(), "written as false");
+        assertFalse(store.listsEndEntityCerts("tls2"));
+        assertFalse(store.listsEndEntityCerts("nope"));
+
+        // Set by hand: read at load, and kept when the derived fields are rewritten.
+        JsonObject edited = json(meta);
+        edited.addProperty(Store.LIST_END_ENTITIES, true);
+        edited.addProperty("role", "root"); // wrong: rebuilt
+        Files.writeString(meta, edited.toString());
+        Store reloaded = Store.open(dir);
+        assertTrue(reloaded.listsEndEntityCerts("tls2"));
+        assertFalse(reloaded.listsEndEntityCerts("root2026"));
+        assertEquals("intermediate", json(meta).get("role").getAsString());
+        assertTrue(json(meta).get(Store.LIST_END_ENTITIES).getAsBoolean());
+        assertTrue(Store.open(dir).listsEndEntityCerts("tls2"), "still set after another load");
+
+        edited.addProperty(Store.LIST_END_ENTITIES, "yes");
+        Files.writeString(meta, edited.toString());
+        assertFalse(Store.open(dir).listsEndEntityCerts("tls2"), "not a boolean: false");
+        edited.remove(Store.LIST_END_ENTITIES);
+        Files.writeString(meta, edited.toString());
+        assertFalse(Store.open(dir).listsEndEntityCerts("tls2"), "missing: false");
+        assertFalse(json(meta).get(Store.LIST_END_ENTITIES).getAsBoolean(), "written back as false");
+    }
+
+    @Test
     void signingCertsAreStoredAndReloaded(@TempDir Path dir) throws Exception {
         Store store = populated(dir);
         assertFalse(store.addSigningCert("tls2", inter), "identical re-add is a no-op");

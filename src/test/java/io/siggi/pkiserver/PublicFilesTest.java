@@ -24,6 +24,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -73,6 +74,8 @@ class PublicFilesTest {
         store.addCrl("siggi.io", crl(), CrlState.CURRENT, Instant.now());
         store.addEndEntityCert("tls2", leaf, Instant.now());
         store.addEndEntityCert("siggi.io", rootLeaf, Instant.now());
+        // siggi.io lists its end-entity certificates; tls2 keeps the default (hidden).
+        listEndEntities(dataDir, "siggi.io");
         server = new PKIServer(Config.parse("{\"listen\": \"127.0.0.1:0\", \"dataDir\": \"data\"}", dir));
         server.start();
         client = HttpClient.newHttpClient();
@@ -81,6 +84,14 @@ class PublicFilesTest {
     @AfterEach
     void stopServer() {
         server.stop();
+    }
+
+    /** Sets {@code listEndEntityCertificates} in a CA's meta.json, as an admin would by hand. */
+    static void listEndEntities(Path dataDir, String slug) throws Exception {
+        Path meta = dataDir.resolve("ca").resolve(slug).resolve(Store.META_FILE);
+        com.google.gson.JsonObject o = com.google.gson.JsonParser.parseString(Files.readString(meta)).getAsJsonObject();
+        o.addProperty(Store.LIST_END_ENTITIES, true);
+        Files.writeString(meta, o.toString());
     }
 
     private static KeyPair keyPair() throws Exception {
@@ -200,7 +211,7 @@ class PublicFilesTest {
 
     @Test
     void unknownPathsAre404() throws Exception {
-        for (String path : new String[]{"/tls3.der", "/tls2", "/tls2.txt", "/tls2.der/x", "/x/tls2.der",
+        for (String path : new String[]{"/tls3.der", "/tls3", "/tls2.txt", "/tls2.der/x", "/x/tls2.der",
                 "/..der", "/TLS2.der", "/.der"}) {
             assertEquals(404, get(path).statusCode(), path);
         }
@@ -370,14 +381,53 @@ class PublicFilesTest {
             assertEquals(200, r.statusCode());
             assertEquals("text/html; charset=utf-8", r.headers().firstValue("Content-Type").orElseThrow());
             String html = new String(r.body(), StandardCharsets.UTF_8);
-            assertTrue(html.contains("href=\"/tls2.der\""), html);
+            assertTrue(html.contains("<h1>Root certificates</h1>"), html);
+            assertTrue(html.contains("href=\"/siggi.io\""), "root links to its page");
             assertTrue(html.contains("href=\"/siggi.io.pem\""), html);
-            assertTrue(html.contains("&lt;Script &amp; Co"), html);
-            assertFalse(html.contains("<Script"));
             assertTrue(html.contains("#42"), "current CRL number shown");
-            assertTrue(html.contains("<td>siggi.io</td>"), "intermediate's issuer shown by slug");
+            assertFalse(html.contains("tls2"), "intermediates are only on their issuer's page");
+            assertFalse(html.contains("End-entity certificates"), html);
+            assertFalse(html.contains("Pending CRLs") || html.contains("Highest CRL number"), html);
             assertTrue(r.headers().firstValue("ETag").isPresent());
         }
+    }
+
+    @Test
+    void authorityPages() throws Exception {
+        HttpResponse<byte[]> r = get("/siggi.io");
+        assertEquals(200, r.statusCode());
+        assertEquals("text/html; charset=utf-8", r.headers().firstValue("Content-Type").orElseThrow());
+        assertEquals("no-cache", r.headers().firstValue("Cache-Control").orElseThrow());
+        assertTrue(r.headers().firstValue("ETag").isPresent());
+        String html = new String(r.body(), StandardCharsets.UTF_8);
+        assertTrue(html.contains("<nav><a href=\"/\">PKI</a> &rsaquo; <code>siggi.io</code></nav>"), html);
+        assertTrue(html.contains("<tr id=\"siggi.io\">"), "the CA itself");
+        assertTrue(html.contains("#42"), "its current CRL");
+        assertTrue(html.contains("<h2>Signing certificates</h2>"), html);
+        assertTrue(html.contains("<tr id=\"tls2\"><td><a href=\"/tls2\">"), "intermediate links to its page");
+        assertTrue(html.contains("&lt;Script &amp; Co"), html);
+        assertFalse(html.contains("<Script"));
+        assertTrue(html.contains("<h2>End-entity certificates</h2>"), html);
+        assertTrue(html.contains("href=\"/siggi.io/1234/fullchain.pem\""), html);
+        assertFalse(html.contains("www.example.com"), "tls2's end-entity certificates are on tls2's page");
+        assertFalse(html.contains("<th>Role</th>") || html.contains("<th>Issuer</th>"), html);
+
+        html = new String(get("/tls2").body(), StandardCharsets.UTF_8);
+        assertTrue(html.contains("<nav><a href=\"/\">PKI</a> &rsaquo; <a href=\"/siggi.io\"><code>siggi.io</code></a>"
+                + " &rsaquo; <code>tls2</code></nav>"), html);
+        assertFalse(html.contains("<h2>Signing certificates</h2>"), "section omitted when empty");
+        // Not listed by default, but still served to whoever knows the URL.
+        assertFalse(html.contains("End-entity certificates") || html.contains("www.example.com"), html);
+        String serial = leaf.getSerialNumber().toString(16);
+        assertFalse(html.contains(serial), html);
+        assertEquals(200, get("/tls2/" + serial + "/certificate.pem").statusCode());
+
+        r = client.send(req("/tls2").method("HEAD", HttpRequest.BodyPublishers.noBody()).build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, r.statusCode());
+        assertEquals(0, r.body().length);
+        assertEquals(405, client.send(req("/tls2").DELETE().build(), HttpResponse.BodyHandlers.ofByteArray())
+                .statusCode());
     }
 
     @Test
@@ -389,7 +439,7 @@ class PublicFilesTest {
                     URI.create("http://127.0.0.1:" + empty.getPort() + "/")).build(),
                     HttpResponse.BodyHandlers.ofString());
             assertEquals(200, r.statusCode());
-            assertTrue(r.body().contains("No signing certificates"));
+            assertTrue(r.body().contains("No root certificates"));
         } finally {
             empty.stop();
         }

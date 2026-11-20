@@ -157,7 +157,7 @@ To remove a CA by hand, stop the server and delete its `ca/<slug>/` directory.
 
 DER files are the source of truth. The JSON files next to them are derived and rebuilt
 at startup when missing or out of date (only `receivedAt`, `uploadedAt` and CRL states
-are read back from them). Every write goes to a temporary file followed by an atomic
+are read back from them), except for one setting, `listEndEntityCertificates` (below). Every write goes to a temporary file followed by an atomic
 rename; leftover `.*.tmp` files are deleted at startup.
 
 ```
@@ -165,7 +165,8 @@ data/
   ca/<slug>/                     one directory per signing certificate; the name is its slug
     cert.der                     the signing certificate (the only file needed)
     meta.json                    role (root/intermediate), subject, issuer, serial,
-                                 SPKI SHA-256, cert SHA-256, validity
+                                 SPKI SHA-256, cert SHA-256, validity;
+                                 listEndEntityCertificates (setting)
     crl/
       <crlNumber>.crl            accepted CRLs, file name = CRL Number in decimal
       <crlNumber>.json           state (current/pending/superseded), thisUpdate,
@@ -179,6 +180,13 @@ data/
 
 A certificate's role is derived from the certificate itself: it is a root if it is
 self-signed and its signature verifies with its own key, otherwise an intermediate.
+
+`listEndEntityCertificates` in a signing certificate's `meta.json` decides whether its page
+lists the end-entity certificates published under it. It defaults to `false`: they are
+then not listed anywhere, and only someone who knows a certificate's URL can fetch it or
+its status. Set it to `true` by hand and restart the server; it is only read at startup,
+and kept when `meta.json` is rebuilt. A value other than `true` or `false` is logged and
+treated as `false`.
 
 ### Startup integrity check
 
@@ -206,11 +214,13 @@ Served over plain HTTP, for `GET` and `HEAD`:
 |---|---|
 | `/<slug>.der` (alias `/<slug>.crt`) | signing certificate, DER, `application/pkix-cert` |
 | `/<slug>.pem` | signing certificate, PEM, `application/x-pem-file` |
-| `/` (alias `/index.html`) | index page: signing certificates, their CRL status and coverage; published end-entity certificates and their revocation status |
+| `/<slug>/<serial>/certificate.pem`, `certificate.der`, `chain.pem`, `fullchain.pem` | end-entity certificate, its chain without the root, and both together |
+| `/` (alias `/index.html`) | index page: the root certificates, with their CRL status and coverage |
+| `/<slug>` | page of a signing certificate: the path to it from its root; the certificate with its CRL status and coverage; the signing certificates it issued; and, if `listEndEntityCertificates` is set, the end-entity certificates published under it, with their revocation status. A section without certificates is left out |
 
 Responses carry an `ETag` (and, for certificates, `Last-Modified`), and conditional
 requests (`If-None-Match`, `If-Modified-Since`) get `304 Not Modified`. Certificates are
-cacheable for an hour; the index page is `no-cache`.
+cacheable for an hour; the index and signing certificate pages are `no-cache`.
 
 ## CRL coverage report
 
@@ -235,8 +245,9 @@ HTTPS through a trusted proxy) returns JSON describing a CA's CRLs:
 `highestCrlNumber` counts every CRL ever accepted, including superseded and discarded
 ones, so the next CRL must use at least `nextCrlNumber`. `coverageUntil` is the last
 `nextUpdate` across the current and pending CRLs. `coverageWarning` is set when that is
-less than `limits.coverageWarningDays` away (or already past). The index page shows the
-same information per CA.
+less than `limits.coverageWarningDays` away (or already past). Each signing certificate's
+page shows the current CRL and coverage (including the warning); the pending CRLs and CRL
+Numbers are only in this report.
 
 ## Certificate status
 
@@ -269,8 +280,8 @@ rest of `/api/*`) returns the status of a published end-entity certificate:
 precedence). A certificate counts as revoked when its issuer's current CRL lists it, or
 when a signing certificate above it is listed in its own issuer's current CRL; then
 `revokedCa` names that CA. `reason` is null when the CRL entry has no reason code.
-Unknown slug or serial: `404`; malformed: `400`. The index page lists the same status for
-every published end-entity certificate.
+Unknown slug or serial: `404`; malformed: `400`. The issuer's page lists the same status
+for its end-entity certificates if `listEndEntityCertificates` is set.
 
 [`examples/upload-crls.py`](examples/upload-crls.py) is a signer-side helper that uploads a
 batch of pre-signed CRLs and prints this report; see [`examples/README.md`](examples/README.md).

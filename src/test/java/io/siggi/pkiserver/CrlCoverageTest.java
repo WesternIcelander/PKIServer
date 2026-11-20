@@ -204,8 +204,9 @@ class CrlCoverageTest {
         assertEquals(405, get("/api/crl", true, "GET").statusCode());
 
         String html = get("/", false, "GET").body();
-        assertTrue(html.contains("#3: "), html);
-        assertTrue(html.contains("next: #4"), html);
+        // Pending CRLs and the next CRL Number are in the API response only.
+        assertFalse(html.contains("#3: "), html);
+        assertFalse(html.contains("next: #4"), html);
         assertTrue(html.contains("class=\"warn\">coverage runs out in 19 days"), html);
     }
 
